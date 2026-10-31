@@ -25,9 +25,10 @@ use axum::body::{Body, to_bytes};
 use axum::extract::State;
 use axum::http::{HeaderValue, Method, header};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use moka::future::Cache;
 
+use crate::common::error::{AppError, ServiceError};
 use crate::jwt::claims::Claims;
 
 /// 缓存默认 TTL（60s）
@@ -103,6 +104,23 @@ impl ResponseCache {
     }
 }
 
+/// 全量读取下游响应体。
+///
+/// 读体失败（下游流中断 / 应用层包装故障）必须**响亮失败**：原实现
+/// `to_bytes(body, usize::MAX).await.unwrap_or_default()` 会把这个失败折成
+/// 空字节，于是客户端收到 **200 + 空响应体**，而且这份空 200 还会被写进缓存
+/// 供后续请求复用 60s——一次流故障被固化成"元数据为空"的界面事实。
+async fn read_full_body(body: Body) -> Result<Vec<u8>, ServiceError> {
+    match to_bytes(body, usize::MAX).await {
+        Ok(bytes) => Ok(bytes.to_vec()),
+        Err(e) => {
+            // 只记错误类型与描述，不带请求体/路径（C.9：结构化日志不泄漏业务数据）
+            tracing::warn!(error = %e, "响应缓存：读取下游响应体失败，本次按 500 返回且不入缓存");
+            Err(ServiceError::internal(&crate::tr!("error.common.internal")))
+        }
+    }
+}
+
 /// 响应缓存中间件
 ///
 /// - 非 GET 或未命中白名单 → 直接放行（不读缓存、不写缓存）。
@@ -149,7 +167,12 @@ pub async fn response_cache_middleware(
 
     let (parts, body) = resp.into_parts();
     // 全量读取响应体（白名单接口为静态 JSON，体积可控），再决定是否入缓存
-    let bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
+    let bytes = match read_full_body(body).await {
+        Ok(bytes) => bytes,
+        // 读体失败不缓存、也不返回「空 200」：走统一错误契约（500 + body.code/msg），
+        // 前端拿到的是可重试的失败，而不是一份看起来成功的空元数据。
+        Err(e) => return AppError::from(e).into_response(),
+    };
     let content_type = parts.headers.get(header::CONTENT_TYPE).cloned();
 
     // 仅缓存未超体积上限的响应；超大/流式响应不入缓存但原样返回
@@ -206,5 +229,94 @@ mod tests {
         assert!(!cache.is_whitelisted("/system/menu/list"));
         assert!(!cache.is_whitelisted("/system/dict/type/list"));
         assert!(!cache.is_whitelisted("/system/dict/data/type/sys_user_sex"));
+    }
+
+    // ============ b142 项 2：读体失败不得折成「200 + 空响应体」 ============
+
+    #[tokio::test]
+    async fn read_full_body_returns_bytes_on_success() {
+        let body = Body::from("{\"code\":200}");
+        let bytes = read_full_body(body).await.expect("正常响应体必须读到");
+        assert_eq!(bytes, b"{\"code\":200}");
+    }
+
+    /// 缺陷形状：下游响应流在下发途中报错。原实现 `unwrap_or_default()` 会返回
+    /// 一份空 200（且写进缓存 60s）；现在必须是 500 —— 前端可重试，而不是读到
+    /// "字典下拉为空"这种看起来成功的元数据。
+    #[tokio::test]
+    async fn read_full_body_fails_loudly_when_stream_errors() {
+        let stream = futures::stream::once(async {
+            Err::<axum::body::Bytes, std::io::Error>(std::io::Error::other("upstream body broke"))
+        });
+        let err = read_full_body(Body::from_stream(stream))
+            .await
+            .expect_err("读体失败必须上抛，不得折成空字节");
+        assert_eq!(err.code, 500, "必须走统一错误契约的 500");
+        assert!(!err.message.is_empty(), "错误文案不得为空");
+    }
+
+    const SOURCE: &str = include_str!("response_cache.rs");
+
+    fn function_body(name: &str) -> String {
+        let marker = format!("fn {name}");
+        let start = SOURCE
+            .find(&marker)
+            .unwrap_or_else(|| panic!("找不到函数 {name}（改名后本锁必须同步）"));
+        let open = SOURCE[start..]
+            .find('{')
+            .map(|i| start + i)
+            .expect("函数签名后必须有花括号");
+        let mut depth = 0usize;
+        for (i, ch) in SOURCE[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return SOURCE[open..=open + i].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("函数 {name} 花括号不配平");
+    }
+
+    #[test]
+    fn body_read_errors_are_never_folded_into_an_empty_cache_entry() {
+        let middleware = function_body("response_cache_middleware");
+        assert!(
+            middleware.contains("read_full_body(body).await"),
+            "中间件必须经 read_full_body 读体（否则读体失败会再次被就地折叠）"
+        );
+        assert!(
+            middleware.contains("AppError::from(e).into_response()"),
+            "读体失败必须转成统一错误响应，而不是返回下游的半截响应"
+        );
+        assert!(
+            !middleware.contains("unwrap_or_default()"),
+            "`unwrap_or_default()` 会把读体失败折成空字节 ⇒ 200 + 空体被缓存"
+        );
+        let reader = function_body("read_full_body");
+        assert!(
+            !reader.contains("unwrap_or_default()"),
+            "read_full_body 自己不得把失败折成成功"
+        );
+        assert!(
+            reader.contains("Err(ServiceError::internal"),
+            "read_full_body 必须返回 Err（否则调用方无从区分成败）"
+        );
+    }
+
+    /// 判据活性：原实现的形状必须被同一谓词抓到
+    #[test]
+    fn empty_cache_fold_detector_is_falsifiable() {
+        let original_shape = r#"
+            let (parts, body) = resp.into_parts();
+            let bytes = to_bytes(body, usize::MAX).await.unwrap_or_default();
+            Response::from_parts(parts, Body::from(bytes))
+        "#;
+        assert!(original_shape.contains("unwrap_or_default()"));
+        assert!(!original_shape.contains("read_full_body(body).await"));
     }
 }

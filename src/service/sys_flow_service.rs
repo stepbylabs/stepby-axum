@@ -2565,8 +2565,16 @@ impl SysFlowService {
             .await?;
         // 仅示例单据内联返回单据主体：其它业务类型的明细由业务模块自身接口提供
         // （引擎不感知单据表结构，W-19），避免把同 id 的无关 demo 单据当成本单据返回。
+        //
+        // 只有「单据确实不存在（404）」才降级为不内联：任务本身仍可查看，历史任务在
+        // 单据被删除后依然要能打开。DB 故障（超时/连接耗尽/转换错误）必须上抛——
+        // 原实现 `.await.ok()` 会让一次抖动在界面上表现为「这条任务没有关联单据」。
         let doc = if task.biz_type == biz_type::DEMO_DOC {
-            self.doc_by_id(task.biz_id).await.ok()
+            match self.doc_by_id(task.biz_id).await {
+                Ok(doc) => Some(doc),
+                Err(e) if e.code == 404 => None,
+                Err(e) => return Err(e),
+            }
         } else {
             None
         };
@@ -3219,5 +3227,92 @@ mod tests {
         }
         assert!(biz_type::find("purchase_order").is_none());
         assert!(biz_type::find("").is_none());
+    }
+
+    // ============ b142 项 3：任务详情的单据读取不得吞掉非 404 失败 ============
+
+    const SOURCE: &str = include_str!("sys_flow_service.rs");
+
+    fn function_body(name: &str) -> String {
+        let marker = format!("fn {name}");
+        let start = SOURCE
+            .find(&marker)
+            .unwrap_or_else(|| panic!("找不到函数 {name}（改名后本锁必须同步）"));
+        let open = SOURCE[start..]
+            .find('{')
+            .map(|i| start + i)
+            .expect("函数签名后必须有花括号");
+        let mut depth = 0usize;
+        for (i, ch) in SOURCE[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return SOURCE[open..=open + i].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("函数 {name} 花括号不配平");
+    }
+
+    /// 判据：只有 404 允许降级为「无单据」，其余错误必须上抛；且**代码行**里不得出现 `.ok()`
+    /// 折叠。注释不参与判定——本函数的说明文字里就写着被禁止的形状（`原实现 .await.ok()`），
+    /// 按原文匹配会让锁红在自己的注释上（AGENTS ⑬：刀口只能落在代码上）。
+    fn downgrades_only_missing_doc(body: &str) -> bool {
+        let code: String = body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        code.contains("Err(e) if e.code == 404 => None")
+            && code.contains("Err(e) => return Err(e)")
+            && !code.contains(".await.ok()")
+    }
+
+    #[test]
+    fn task_detail_only_downgrades_missing_doc_not_db_errors() {
+        let body = function_body("task_detail");
+        assert!(
+            body.contains("match self.doc_by_id(task.biz_id).await"),
+            "单据读取必须用 match 区分 404 与其它错误（`.ok()` 会把 DB 故障折成「没有单据」）"
+        );
+        assert!(
+            downgrades_only_missing_doc(&body),
+            "task_detail 必须只在 404 时降级、其余错误 `return Err(e)`；\
+             否则一次 DB 抖动会让界面显示「这条任务没有关联单据」"
+        );
+    }
+
+    /// 判据活性：HEAD 的缺陷形状（`.await.ok()`）必须被同一谓词判否
+    #[test]
+    fn missing_doc_downgrade_detector_is_falsifiable() {
+        let original_shape = r#"
+            let doc = if task.biz_type == biz_type::DEMO_DOC {
+                self.doc_by_id(task.biz_id).await.ok()
+            } else {
+                None
+            };
+        "#;
+        assert!(
+            !downgrades_only_missing_doc(original_shape),
+            "缺陷形状必须被判否：{original_shape}"
+        );
+        let compliant = r#"
+            match self.doc_by_id(task.biz_id).await {
+                Ok(doc) => Some(doc),
+                Err(e) if e.code == 404 => None,
+                Err(e) => return Err(e),
+            }
+        "#;
+        assert!(downgrades_only_missing_doc(compliant), "合规形状必须放行");
+        // 注释里提到被禁的形状不得影响判定（本函数的说明文字正是这样写的）
+        let commented = format!("// 禁止 .await.ok() 折叠\n{compliant}");
+        assert!(
+            downgrades_only_missing_doc(&commented),
+            "注释不得决定刀口：只有代码行才参与判定"
+        );
     }
 }

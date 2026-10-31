@@ -947,28 +947,40 @@ impl SysReportService {
     // ==================== 报表快照生成 ====================
 
     /// 生成报表快照（复用既有 dashboard / 登录统计聚合逻辑；custom 类型透传配置 JSON）
+    ///
+    /// 聚合取数失败一律 `?` 上抛：快照里的 0 / 空趋势是**事实**，不能由一次 DB 抖动
+    /// 冒充。预览与订阅推送共用本函数，失败时订阅不投递、`last_run_time` 不前进
+    /// （否则一封“0 用户 0 消息”的报表会被当成成功投递出去）。
     pub async fn generate_snapshot(&self, report: &SysReportModel) -> Result<Value, ServiceError> {
         let data = match report.report_type.as_str() {
-            "login_stats" => self.snapshot_login(report).await,
-            "user_stats" => self.snapshot_user(report.tenant_id).await,
-            "msg_stats" => self.snapshot_msg(report.tenant_id).await,
-            "custom" => serde_json::from_str::<Value>(&report.config)
-                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            "login_stats" => self.snapshot_login(report).await?,
+            "user_stats" => self.snapshot_user(report.tenant_id).await?,
+            "msg_stats" => self.snapshot_msg(report.tenant_id).await?,
+            // 配置坏掉不能折成空报表：订阅会发出一张「什么都没有」的报告并推进
+            // last_run_time，管理员再也看不到这次失败。落库时已校验过 JSON，
+            // 能走到这里说明存量行被外部改坏——按 400 点名理由，让人去修配置。
+            "custom" => serde_json::from_str::<Value>(&report.config).map_err(|e| {
+                tracing::warn!(
+                    report_id = report.report_id,
+                    error = %e,
+                    "报表 custom 配置解析失败"
+                );
+                ServiceError::bad_request(&crate::tr!("error.report.config_json_invalid"))
+            })?,
             _ => Value::Null,
         };
         Ok(data)
     }
 
     /// 登录统计快照：最近 N 天每日成功/失败 + 今日异常 IP 数
-    async fn snapshot_login(&self, report: &SysReportModel) -> Value {
+    async fn snapshot_login(&self, report: &SysReportModel) -> Result<Value, ServiceError> {
         let days = config_days(&report.config, DEFAULT_STAT_DAYS);
         // 按报表所属租户统计，出租户（tenant_id=0）为平台视角不过滤
         let tenant = crate::common::tenant::tenant_scope(report.tenant_id);
         let daily = self
             .logininfor_service
             .daily_stats(days, tenant)
-            .await
-            .unwrap_or_default()
+            .await?
             .into_iter()
             .map(|d| {
                 serde_json::json!({
@@ -981,13 +993,12 @@ impl SysReportService {
         let today_failed_ips = self
             .logininfor_service
             .count_today_failed_ips(tenant)
-            .await
-            .unwrap_or(0);
-        serde_json::json!({ "days": days, "todayFailedIps": today_failed_ips, "daily": daily })
+            .await?;
+        Ok(serde_json::json!({ "days": days, "todayFailedIps": today_failed_ips, "daily": daily }))
     }
 
     /// 用户统计快照：总量/启用/停用/近 7 天新增 + 近 30 天创建趋势
-    async fn snapshot_user(&self, tenant_id: i64) -> Value {
+    async fn snapshot_user(&self, tenant_id: i64) -> Result<Value, ServiceError> {
         use chrono::{Duration, NaiveTime};
         let db = self.report_repo.base().db();
         let now = crate::common::datetime::today_utc();
@@ -998,10 +1009,10 @@ impl SysReportService {
 
         // 按报表所属租户统计用户维度（出租户不过滤）
         let tenant = crate::common::tenant::tenant_scope(tenant_id);
-        let total = count_of(db, None, tenant).await;
-        let active = count_of(db, Some(("0", None)), tenant).await;
-        let disabled = count_of(db, Some(("1", None)), tenant).await;
-        let new_this_week = count_of(db, Some(("0", Some(week_begin))), tenant).await;
+        let total = count_of(db, None, tenant).await?;
+        let active = count_of(db, Some(("0", None)), tenant).await?;
+        let disabled = count_of(db, Some(("1", None)), tenant).await?;
+        let new_this_week = count_of(db, Some(("0", Some(week_begin))), tenant).await?;
 
         let mut query = SysUser::find()
             .filter(UserColumn::DelFlag.ne("2"))
@@ -1018,8 +1029,7 @@ impl SysReportService {
             .order_by_asc(UserColumn::CreateTime)
             .into_tuple::<NaiveDateTime>()
             .all(db)
-            .await
-            .unwrap_or_default();
+            .await?;
 
         let mut trend_map: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
@@ -1038,21 +1048,22 @@ impl SysReportService {
             }));
         }
 
-        serde_json::json!({
+        Ok(serde_json::json!({
             "totalUsers": total,
             "activeUsers": active,
             "disabledUsers": disabled,
             "newUsersThisWeek": new_this_week,
             "createTrend": trend,
-        })
+        }))
     }
 
     /// 消息统计快照：发送总量 + 按状态分布（成功/失败/待重试）
-    async fn snapshot_msg(&self, tenant_id: i64) -> Value {
+    async fn snapshot_msg(&self, tenant_id: i64) -> Result<Value, ServiceError> {
         let db = self.report_repo.base().db();
         // 按报表所属租户统计消息投递维度（出租户不过滤）
         let tenant = crate::common::tenant::tenant_scope(tenant_id);
-        let base = |status: Option<&str>| {
+        let mut counts = Vec::with_capacity(4);
+        for status in [None, Some("0"), Some("1"), Some("2")] {
             let mut q = SysMsgSendLog::find();
             if let Some(tid) = tenant {
                 q = q.filter(MsgLogColumn::TenantId.eq(tid));
@@ -1060,13 +1071,12 @@ impl SysReportService {
             if let Some(s) = status {
                 q = q.filter(MsgLogColumn::Status.eq(s));
             }
-            q.count(db)
-        };
-        let total = base(None).await.unwrap_or(0);
-        let success = base(Some("0")).await.unwrap_or(0);
-        let failed = base(Some("1")).await.unwrap_or(0);
-        let pending = base(Some("2")).await.unwrap_or(0);
-        serde_json::json!({ "total": total, "success": success, "failed": failed, "pending": pending })
+            counts.push(q.count(db).await?);
+        }
+        let [total, success, failed, pending] = [counts[0], counts[1], counts[2], counts[3]];
+        Ok(
+            serde_json::json!({ "total": total, "success": success, "failed": failed, "pending": pending }),
+        )
     }
 
     /// 预览报表快照（手动触发，不落库、不推送）
@@ -1297,7 +1307,7 @@ async fn count_of(
     db: &DatabaseConnection,
     filter: Option<(&str, Option<NaiveDateTime>)>,
     tenant: Option<i64>,
-) -> i64 {
+) -> Result<i64, ServiceError> {
     let mut q = SysUser::find();
     q = q.filter(UserColumn::DelFlag.ne("2"));
     if let Some(tid) = tenant {
@@ -1309,10 +1319,8 @@ async fn count_of(
             q = q.filter(UserColumn::CreateTime.gte(begin));
         }
     }
-    q.count(db)
-        .await
-        .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+    let count = q.count(db).await?;
+    Ok(i64::try_from(count).unwrap_or(i64::MAX))
 }
 
 // ==================== 单元测试 ====================
@@ -1523,5 +1531,135 @@ mod tests {
         union.sort_unstable();
         assert_eq!(union, vec![11, 12, 13, 14]);
         assert_eq!(ok.len(), 2);
+    }
+
+    // ==================== b142 项 1：快照聚合失败不得折成 0 ====================
+
+    const SOURCE: &str = include_str!("sys_report_service.rs");
+
+    /// 取 `fn <name>` 的**函数体**（花括号配平），而非整份文件——
+    /// 整份文件里测试自身会提到这些失败形状，按全文判会自己命中自己。
+    fn function_body(name: &str) -> String {
+        let marker = format!("fn {name}");
+        let start = SOURCE
+            .find(&marker)
+            .unwrap_or_else(|| panic!("找不到函数 {name}（改名后本锁必须同步）"));
+        let open = SOURCE[start..]
+            .find('{')
+            .map(|i| start + i)
+            .expect("函数签名后必须有花括号");
+        let mut depth = 0usize;
+        for (i, ch) in SOURCE[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return SOURCE[open..=open + i].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("函数 {name} 花括号不配平");
+    }
+
+    /// 判据：**取数语句**里不得存在"把失败折成默认值"的三类形状。
+    ///
+    /// 刀口取"含 `.await` 的语句"而不是整段函数体：派生默认值（如
+    /// `trend_map.get(&date_str).unwrap_or(0)`——查不到就是 0 天）与整数
+    /// 溢出兜底（`i64::try_from(..).unwrap_or(i64::MAX)`）都不是取数失败，
+    /// 按全文禁 `unwrap_or(0)` 会把它们一并判红，下一批就会去放宽判据。
+    fn folds_errors_into_defaults(body: &str) -> Vec<&'static str> {
+        let mut hits = Vec::new();
+        for statement in body.split(';') {
+            if !statement.contains(".await") {
+                continue;
+            }
+            for needle in ["unwrap_or(0)", "unwrap_or_default()", ".ok()"] {
+                if statement.contains(needle) && !hits.contains(&needle) {
+                    hits.push(needle);
+                }
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn snapshot_helpers_never_fold_db_errors_into_zero() {
+        for name in [
+            "generate_snapshot",
+            "snapshot_login",
+            "snapshot_user",
+            "snapshot_msg",
+            "count_of",
+        ] {
+            let hits = folds_errors_into_defaults(&function_body(name));
+            assert!(
+                hits.is_empty(),
+                "{name} 把取数失败折成了默认值（命中 {hits:?}）：一次 DB 抖动会变成报表里的 0/空趋势，\
+                 而预览与订阅推送都会把它当成事实发出去——必须 `?` 上抛"
+            );
+        }
+    }
+
+    /// 接线反查：三条快照分支必须真的用 `?` 传播，而不是只把返回类型改宽
+    #[test]
+    fn generate_snapshot_propagates_every_branch() {
+        let body = function_body("generate_snapshot");
+        for needle in [
+            "self.snapshot_login(report).await?",
+            "self.snapshot_user(report.tenant_id).await?",
+            "self.snapshot_msg(report.tenant_id).await?",
+        ] {
+            assert!(
+                body.contains(needle),
+                "generate_snapshot 缺少 `{needle}`：分支没走 `?` 时失败会被折叠成空快照"
+            );
+        }
+    }
+
+    /// custom 配置解析失败不得折成空对象：那会让订阅发出一张空报表并推进
+    /// `last_run_time`（管理员此后看不到这次失败）。
+    #[test]
+    fn custom_config_parse_failure_is_not_folded() {
+        let body = function_body("generate_snapshot");
+        assert!(
+            body.contains("error.report.config_json_invalid"),
+            "custom 配置解析失败必须点名理由并上抛"
+        );
+        assert!(
+            !body.contains("unwrap_or_else(|_| Value::Object"),
+            "HEAD 的空对象兜底必须已删除（否则坏配置 = 一张空报表）"
+        );
+    }
+
+    /// 判据活性：把缺陷形状（原实现）喂给同一个谓词必须被抓到，
+    /// 否则上面两条只能证明"文本里没这些词"，不能证明"这类缺陷会被判红"。
+    #[test]
+    fn snapshot_fold_detector_is_falsifiable() {
+        // HEAD 的真实形状：三处取数各自折成默认值（含一处跨行链式调用）
+        let original_shape = r#"
+            let total = count_of(db, None, tenant).await;
+            let times = query.all(db).await.unwrap_or_default();
+            let doc = repo.find_by_id(id).await.ok();
+            let n = q.count(db)
+                .await
+                .map(|c| c as i64)
+                .unwrap_or(0);
+        "#;
+        let hits = folds_errors_into_defaults(original_shape);
+        assert_eq!(hits.len(), 3, "缺陷形状必须三处全被抓到：{hits:?}");
+
+        let compliant = r#"
+            let total = count_of(db, None, tenant).await?;
+            let times = query.all(db).await?;
+            let day_count = trend_map.get(&date_str).copied().unwrap_or(0);
+            let capped = i64::try_from(count).unwrap_or(i64::MAX);
+        "#;
+        assert!(
+            folds_errors_into_defaults(compliant).is_empty(),
+            "合规形状（含派生默认值与整数溢出兜底）不得被误报"
+        );
     }
 }

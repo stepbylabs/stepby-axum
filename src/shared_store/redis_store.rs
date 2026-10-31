@@ -708,6 +708,7 @@ impl RedisStore {
 
         // ① 吊销权威层 → blacklist 键
         let mut rev_count: usize = 0;
+        let mut rev_failed: usize = 0;
         match db
             .query_all_raw(crate::common::sql_dialect::stmt(
                 backend,
@@ -730,15 +731,23 @@ impl RedisStore {
                     };
                     let mut redis = self.conn.clone();
                     let key = format!("blacklist:{hash}");
-                    // EXISTS 失败按已存在跳过（保守：避免对不可达 Redis 重复 SETEX 刷新 TTL）
-                    let exists: i64 = crate::utils::redis::cmd_timeout(
+                    // EXISTS 失败**不得**读成“已存在”：键缺失意味着已吊销令牌重新可用
+                    // （shared_store/mod.rs 的“复活”档）。SETEX 的 TTL 由 DB 权威行的
+                    // 剩余有效期算出，重写幂等，故读失败时按缺失处理并尝试写入。
+                    let exists: i64 = match crate::utils::redis::cmd_timeout(
                         redis::cmd("EXISTS").arg(&key).query_async(&mut redis),
                     )
                     .await
-                    .unwrap_or(1);
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "吊销回填：EXISTS 失败，按缺失处理并尝试 SETEX");
+                            0
+                        }
+                    };
                     if exists == 0 {
                         let ttl = (exp - now).max(1);
-                        let _: Result<(), _> = crate::utils::redis::cmd_timeout(
+                        match crate::utils::redis::cmd_timeout(
                             redis::cmd("SET")
                                 .arg(&key)
                                 .arg("1")
@@ -746,8 +755,20 @@ impl RedisStore {
                                 .arg(ttl)
                                 .query_async(&mut redis),
                         )
-                        .await;
-                        rev_count += 1;
+                        .await
+                        {
+                            Ok(()) => rev_count += 1,
+                            Err(e) => {
+                                // 键名是令牌哈希，属凭据派生值：日志只打错误与聚合计数。
+                                rev_failed += 1;
+                                if rev_failed == 1 {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "吊销回填：SETEX 失败（后续同类失败只计数，不逐条打日志）"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -758,6 +779,7 @@ impl RedisStore {
 
         // ② 密码版本列 → pwd_ver 键
         let mut ver_count: usize = 0;
+        let mut ver_failed: usize = 0;
         match db
             .query_all_raw(Statement::from_sql_and_values(
                 backend,
@@ -781,22 +803,41 @@ impl RedisStore {
                     };
                     let mut redis = self.conn.clone();
                     let key = format!("pwd_ver:{uid}");
-                    let redis_val: Option<String> = crate::utils::redis::cmd_timeout(
+                    let redis_val: Option<String> = match crate::utils::redis::cmd_timeout(
                         redis::cmd("GET").arg(&key).query_async(&mut redis),
                     )
                     .await
-                    .unwrap_or(None);
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // 读失败按 0（落后）处理：SET 幂等，宁可多写一次也不能让
+                            // 旧口令版本继续放行（见 shared_store/mod.rs 的“复活”档）。
+                            tracing::warn!(error = %e, "pwd_ver 回填：GET 失败，按落后处理并尝试 SET");
+                            None
+                        }
+                    };
                     let cur = redis_val.and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
                     // 仅 Redis 值落后于 DB 列时回填（幂等；无 TTL，与现状一致）
                     if cur < std::cmp::max(db_ver, 0) as u64 {
-                        let _: Result<(), _> = crate::utils::redis::cmd_timeout(
+                        match crate::utils::redis::cmd_timeout(
                             redis::cmd("SET")
                                 .arg(&key)
                                 .arg(db_ver.to_string())
                                 .query_async(&mut redis),
                         )
-                        .await;
-                        ver_count += 1;
+                        .await
+                        {
+                            Ok(()) => ver_count += 1,
+                            Err(e) => {
+                                ver_failed += 1;
+                                if ver_failed == 1 {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "pwd_ver 回填：SET 失败（后续同类失败只计数，不逐条打日志）"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -804,10 +845,144 @@ impl RedisStore {
                 tracing::warn!(error = %e, "pwd_ver 回填：sys_user 读取失败（跳过该步）");
             }
         }
-        tracing::info!(
-            revocations = rev_count,
-            pwd_versions = ver_count,
-            "Redis 启动回填完成（DB 权威层 → 共享态）"
+        if rev_failed > 0 || ver_failed > 0 {
+            // 失败必须可归因：旧实现无论成败都打“回填完成”，运维据此认为共享态已恢复，
+            // 而缺失的 blacklist / pwd_ver 恰是“吊销可复活”档（见 shared_store/mod.rs 分级）。
+            tracing::warn!(
+                revocations = rev_count,
+                revocations_failed = rev_failed,
+                pwd_versions = ver_count,
+                pwd_versions_failed = ver_failed,
+                "Redis 启动回填未完全成功：失败项会在下次启动重试，期间相关共享态可能缺失（安全态按 DB 权威层下次启动补回）"
+            );
+        } else {
+            tracing::info!(
+                revocations = rev_count,
+                pwd_versions = ver_count,
+                "Redis 启动回填完成（DB 权威层 → 共享态）"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    const SOURCE: &str = include_str!("redis_store.rs");
+
+    /// 取 `fn <name>` 的函数体（花括号配平）。注释里出现的针不得决定判定。
+    fn function_body(name: &str) -> String {
+        let marker = format!("fn {name}");
+        let start = SOURCE
+            .find(&marker)
+            .unwrap_or_else(|| panic!("找不到函数 {name}（改名后本锁必须同步）"));
+        let open = SOURCE[start..]
+            .find('{')
+            .map(|i| start + i)
+            .expect("函数签名后必须有花括号");
+        let mut depth = 0usize;
+        for (i, ch) in SOURCE[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return SOURCE[open..=open + i].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("函数 {name} 花括号不配平");
+    }
+
+    /// 去掉整行注释（本函数自己的说明文字写着被禁的形状，按原文匹配会红在注释上）。
+    fn code_only(body: &str) -> String {
+        body.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 判据：每一处写失败都必须被计数并最终分档报出。
+    ///
+    /// 逐条对应 HEAD 的真实缺陷：
+    /// - `unwrap_or(1)`：EXISTS 失败被读成"键已存在" ⇒ 吊销键永不补回（令牌复活）；
+    /// - `let _: Result<(), _>`：SET 结果被丢弃 ⇒ 日志照打"回填完成"；
+    /// - 缺 `*_failed` 计数 / 缺分档 WARN：失败不可归因。
+    fn reports_bootstrap_failures(body: &str) -> bool {
+        let code = code_only(body);
+        !code.contains("unwrap_or(1)")
+            && !code.contains("let _: Result<(), _>")
+            && code.contains("rev_failed += 1")
+            && code.contains("ver_failed += 1")
+            && code.contains("EXISTS 失败")
+            && code.contains("GET 失败")
+            && code.contains("SET 失败")
+            && code.contains("回填未完全成功")
+            && code.contains("revocations_failed = rev_failed")
+            && code.contains("pwd_versions_failed = ver_failed")
+    }
+
+    #[test]
+    fn bootstrap_failures_are_counted_and_reported() {
+        let body = function_body("bootstrap_from_db");
+        assert!(
+            reports_bootstrap_failures(&body),
+            "bootstrap_from_db 把失败折成了默认值/丢弃了失败：\n\
+             - EXISTS 必须 WARN 并按缺失处理（不得 unwrap_or(1)）\n\
+             - SET/GET 失败必须计数并在末尾分档 WARN（不得 `let _: Result`）"
         );
+    }
+
+    /// 判据活性：HEAD 的缺陷形状必须被判否，修好后的形状必须放行。
+    #[test]
+    fn bootstrap_failure_detector_is_falsifiable() {
+        let original_shape = r#"
+            let exists: i64 = cmd_timeout(redis::cmd("EXISTS").arg(&key).query_async(&mut redis))
+                .await
+                .unwrap_or(1);
+            if exists == 0 {
+                let _: Result<(), _> = cmd_timeout(redis::cmd("SET").arg(&key).query_async(&mut redis)).await;
+            }
+            let redis_val: Option<String> = cmd_timeout(...).await.unwrap_or(None);
+            tracing::info!("Redis 启动回填完成（DB 权威层 → 共享态）");
+        "#;
+        assert!(
+            !reports_bootstrap_failures(original_shape),
+            "HEAD 的缺陷形状必须被判否"
+        );
+
+        let compliant = r#"
+            let exists: i64 = match cmd_timeout(redis::cmd("EXISTS").arg(&key).query_async(&mut redis)).await {
+                Ok(v) => v,
+                Err(e) => { tracing::warn!(error = %e, "吊销回填：EXISTS 失败，按缺失处理并尝试 SETEX"); 0 }
+            };
+            match cmd_timeout(redis::cmd("SET").arg(&key).query_async(&mut redis)).await {
+                Ok(()) => rev_count += 1,
+                Err(e) => { rev_failed += 1; tracing::warn!(error = %e, "吊销回填：SET 失败"); }
+            }
+            let redis_val = match cmd_timeout(redis::cmd("GET").arg(&key).query_async(&mut redis)).await {
+                Ok(v) => v,
+                Err(e) => { tracing::warn!(error = %e, "pwd_ver 回填：GET 失败，按落后处理并尝试 SET"); None }
+            };
+            match set_result {
+                Ok(()) => ver_count += 1,
+                Err(e) => { ver_failed += 1; tracing::warn!(error = %e, "pwd_ver 回填：SET 失败"); }
+            }
+            tracing::warn!(revocations_failed = rev_failed, pwd_versions_failed = ver_failed,
+                "Redis 启动回填未完全成功：失败项会在下次启动重试");
+        "#;
+        assert!(
+            reports_bootstrap_failures(compliant),
+            "修好后的形状必须放行（否则这把锁会在合规代码上红）"
+        );
+    }
+
+    /// 控制组：注释里提到 `unwrap_or(1)` 不得让判定变红（刀口只落在代码上）。
+    #[test]
+    fn bootstrap_detector_ignores_comments() {
+        let body = function_body("bootstrap_from_db");
+        let with_comment = format!("// 历史实现曾是 unwrap_or(1)\n{body}");
+        assert!(reports_bootstrap_failures(&with_comment));
     }
 }

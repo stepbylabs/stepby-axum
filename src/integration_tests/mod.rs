@@ -56,6 +56,7 @@ mod response_cache;
 mod retention_cleanup;
 mod scim;
 mod scim_groups;
+mod shared_store_bootstrap;
 mod shared_store_gc;
 mod sso;
 mod switch_modes;
