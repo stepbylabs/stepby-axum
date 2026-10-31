@@ -10,6 +10,8 @@ use futures::future::FutureExt;
 use garde::Validate;
 use sea_orm::{DatabaseConnection, Set, TransactionTrait};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::Duration;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::error::ServiceError;
@@ -427,7 +429,7 @@ impl SysNoticeService {
         dto: NoticeAddDto,
         operator: &str,
         operator_tid: i64,
-        state: Option<&AppState>,
+        state: Option<&Arc<AppState>>,
     ) -> Result<SysNoticeModel, ServiceError> {
         crate::common::i18n::validate(&dto)?;
         // P3 修复: 枚举值白名单校验，防止脏数据
@@ -489,76 +491,52 @@ impl SysNoticeService {
             );
         }
 
-        // 邮件通知（可选）：仅在调用方传入 AppState 且 dto.notify_email=true 时发送
+        // 邮件通知（可选）：仅在调用方传入 AppState 且 dto.notify_email=true 时发送。
+        //
+        // **b140：渲染留在请求作用域、投递改走受守卫后台任务。** 改造前这里是
+        // `self.send_notice_email(…).await`——一条 SMTP 批量投递挂在"新增公告"的请求上：
+        // ① 公告行**早已提交**，投递却可能在请求层超时（默认档 120s，见
+        // `middleware::request_timeout`）处被砍断 ⇒ 操作人看到 408/失败，而公告已经存在，
+        // 于是"再点一次"会造出重复公告 + 第二轮群发；② 收件人数由租户人数决定，请求时长
+        // 因此不可预测；③ 被砍断的那一批没有任何留痕能说明"发到第几封"。
+        // 主题/正文/兜底文案取 `crate::tr!` 的请求 locale，**只能**在请求作用域内取；
+        // 收件人枚举、偏好过滤与 SMTP 与 locale 无关，整体交给 `spawn_tracked`
+        // （超时 + panic 隔离 + 结局指标，AGENTS B.6）。
         if dto.notify_email
             && let Some(st) = state
         {
-            self.send_notice_email(st, operator_tid, &dto.notice_title, safe_content.as_deref())
-                .await;
+            if st.mailer_service.is_enabled() {
+                let mail = self
+                    .render_notice_email(st, &dto.notice_title, safe_content.as_deref())
+                    .await;
+                let host = st.clone();
+                let tenant_id = operator_tid;
+                crate::common::background::spawn_tracked(
+                    "notice_email_dispatch",
+                    NOTICE_EMAIL_BUDGET,
+                    Some(st.observability.metrics.clone()),
+                    async move {
+                        deliver_notice_emails(host, tenant_id, mail).await;
+                    },
+                );
+            } else {
+                tracing::debug!("邮件功能未启用，跳过通知公告邮件发送: {}", dto.notice_title);
+            }
         }
 
         Ok(model)
     }
 
-    /// 发送通知邮件给所有启用状态用户
+    /// 渲染公告邮件的**主题与正文**（必须在请求作用域内调用：取 `tr!` 的 locale）
     ///
-    /// 查询所有 status='0' 且 email 非空的用户邮箱，调用 MailerService 批量发送。
-    /// 失败仅记录 tracing::warn!，不阻断主流程。
-    async fn send_notice_email(
+    /// 与投递拆开是为了让 locale 依赖留在请求里；收件人枚举与 SMTP 都不依赖 locale，
+    /// 因此可以（也应该）离开请求路径。
+    async fn render_notice_email(
         &self,
         state: &AppState,
-        tenant_id: i64,
         title: &str,
         content: Option<&str>,
-    ) {
-        if !state.mailer_service.is_enabled() {
-            tracing::debug!("邮件功能未启用，跳过通知公告邮件发送: {}", title);
-            return;
-        }
-
-        // 查询本租户启用状态用户邮箱，并按个人偏好/免打扰过滤（email_notify 且 announce_notify，且不在免打扰窗口）
-        let pairs = match self.find_active_user_email_pairs(state, tenant_id).await {
-            Ok(list) if !list.is_empty() => list,
-            Ok(_) => {
-                tracing::info!("无启用状态用户邮箱，跳过邮件发送: {}", title);
-                return;
-            }
-            Err(e) => {
-                tracing::warn!("查询用户邮箱失败，跳过邮件发送: {}", e);
-                return;
-            }
-        };
-
-        // 批量读取用户偏好，过滤出允许接收公告邮件的用户
-        let user_ids: Vec<i64> = pairs.iter().map(|(uid, _)| *uid).collect();
-        let prefs = match self.pref_repo.find_by_user_ids(&user_ids).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("查询用户消息偏好失败，采用全部投递: {}", e);
-                return;
-            }
-        };
-        let mut pref_map = std::collections::HashMap::<i64, &PrefModel>::new();
-        for p in &prefs {
-            pref_map.insert(p.user_id, p);
-        }
-        let now_hm = now_hm_str();
-        let emails: Vec<String> = pairs
-            .into_iter()
-            .filter(|(uid, _)| {
-                match pref_map.get(uid) {
-                    // 无偏好记录 → 默认允许（与缺省行为一致）
-                    None => true,
-                    Some(p) => allows_delivery(PrefChannel::Email, p, &now_hm),
-                }
-            })
-            .map(|(_, email)| email)
-            .collect();
-        if emails.is_empty() {
-            tracing::info!("无满足消息偏好/免打扰的用户，跳过邮件发送: {}", title);
-            return;
-        }
-
+    ) -> NoticeMail {
         // 构建邮件正文（G-16：平台模板 notice_email 优先，缺失/停用回落内置默认）
         //
         // 模板变量：{{title}}/{{content}}/{{footer}}，均在**代码侧先 html_escape**
@@ -600,24 +578,9 @@ impl SysNoticeService {
                 footer = params.get("footer").map(String::as_str).unwrap_or(""),
             ),
         };
-        let subject = format!("{}{}", subject_prefix, title);
-        match state
-            .mailer_service
-            .send_batch(&emails, &subject, &body)
-            .await
-        {
-            Ok(result) => {
-                tracing::info!(
-                    "通知公告邮件发送完成: title={}, total={}, success={}, failed={}",
-                    title,
-                    result.total,
-                    result.success,
-                    result.failed
-                );
-            }
-            Err(e) => {
-                tracing::warn!("通知公告邮件发送失败: title={}, error={}", title, e);
-            }
+        NoticeMail {
+            subject: format!("{}{}", subject_prefix, title),
+            body,
         }
     }
 
@@ -627,7 +590,6 @@ impl SysNoticeService {
     /// tenant_id=0（平台）时不过滤，覆盖全部租户。
     async fn find_active_user_email_pairs(
         &self,
-        _state: &AppState,
         tenant_id: i64,
     ) -> Result<Vec<(i64, String)>, ServiceError> {
         use crate::entity::sys_user::{Column as UserColumn, Entity as UserEntity};
@@ -1164,6 +1126,126 @@ impl SysNoticeService {
     }
 }
 
+/// 公告邮件群发的后台投递预算（**止损**，不是耗时预估）。
+///
+/// 取 30 分钟的依据是一条可算的容量式，而不是"感觉够用"：单封 SMTP 的硬上限是
+/// `MAIL_SEND_TIMEOUT`（10s），批量并发是 `MAIL_BATCH_CONCURRENCY`（5），因此**最坏情况**
+/// （每封都打满超时）下 30 分钟容得下
+/// `30×60 / 10 × 5 = 900` 封；正常投递远快于超时上限，容量按比例更大。
+/// 收件人**不设上限**——上限意味着有人收不到公告邮件，那是把功能砍掉而不是加护栏
+/// （AGENTS 项目定位：能力全备）。超出容量的表现是 `run_tracked` 那条超时 WARN
+/// （`bg:notice_email_dispatch{outcome="timeout"}`），而不是静默少发。
+/// 翻这个数需要该指标的实测超时计数（AGENTS B.6 失败审计）。
+const NOTICE_EMAIL_BUDGET: Duration = Duration::from_secs(30 * 60);
+
+/// 编译期钳：**最坏情况容量必须够得着一次真实群发**。
+///
+/// 容量 = `预算 / MAIL_SEND_TIMEOUT × MAIL_BATCH_CONCURRENCY`（每封都打满超时时的下界）。
+/// 三个量任一处被改动而容量掉到 500 封以下时，构建当场失败——这比"某天安超大批量、
+/// 群发被预算砍在半截且没人知道为什么"便宜得多（AGENTS B.6 的编译期钳法：关系写在代码里，
+/// 不留在注释里）。
+const _: () = assert!(
+    NOTICE_EMAIL_BUDGET.as_secs() / crate::common::constants::MAIL_SEND_TIMEOUT.as_secs()
+        * crate::service::mailer_service::MAIL_BATCH_CONCURRENCY as u64
+        >= 500,
+    "公告邮件预算的最坏情况容量已低于 500 封：要么预算被调小，要么并发/单封超时被调大"
+);
+
+/// 公告邮件的渲染产物（主题 + HTML 正文）。
+///
+/// 单列一个类型的理由是把**生命周期**写进形状：主题/正文取 `tr!` 的请求 locale，只能在
+/// 请求作用域内产出；收件人枚举与 SMTP 与 locale 无关，可以离开请求。渲染与投递分家之后，
+/// 后台任务里不再有任何一处依赖"当前这个请求是谁、用什么语言"。
+struct NoticeMail {
+    subject: String,
+    body: String,
+}
+
+/// 后台投递一封公告邮件给本租户全部满足偏好的收件人。
+///
+/// 语义（与改造前逐条保持）：邮件未启用不调用；无收件人 INFO 后返回；收件人查询失败
+/// WARN 后返回；偏好查询失败**不投递**（原实现是"采用全部投递"却 `return`，注释与事实
+/// 相反——这里按代码的真实结局写注释，失败就是不投）。
+async fn deliver_notice_emails(state: Arc<AppState>, tenant_id: i64, mail: NoticeMail) {
+    let title = mail.subject.clone();
+    let pairs = match state
+        .notice_service
+        .find_active_user_email_pairs(tenant_id)
+        .await
+    {
+        Ok(list) if !list.is_empty() => list,
+        Ok(_) => {
+            tracing::info!("无启用状态用户邮箱，跳过邮件发送: {}", title);
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("查询用户邮箱失败，跳过邮件发送: {}", e);
+            return;
+        }
+    };
+
+    // 批量读取用户偏好，过滤出允许接收公告邮件的用户（email_notify 且 announce_notify，
+    // 且不在免打扰窗口）
+    let user_ids: Vec<i64> = pairs.iter().map(|(uid, _)| *uid).collect();
+    let prefs = match state
+        .notice_service
+        .pref_repo
+        .find_by_user_ids(&user_ids)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("查询用户消息偏好失败，本次不投递: {}", e);
+            return;
+        }
+    };
+    let mut pref_map = std::collections::HashMap::<i64, &PrefModel>::new();
+    for p in &prefs {
+        pref_map.insert(p.user_id, p);
+    }
+    let now_hm = now_hm_str();
+    let emails: Vec<String> = pairs
+        .into_iter()
+        .filter(|(uid, _)| {
+            match pref_map.get(uid) {
+                // 无偏好记录 → 默认允许（与缺省行为一致）
+                None => true,
+                Some(p) => allows_delivery(PrefChannel::Email, p, &now_hm),
+            }
+        })
+        .map(|(_, email)| email)
+        .collect();
+    if emails.is_empty() {
+        tracing::info!("无满足消息偏好/免打扰的用户，跳过邮件发送: {}", title);
+        return;
+    }
+    // 群发规模必须可见：运维判断"这次为什么慢/为什么超时"的第一手事实是收件人数，
+    // 而不是"发了一封公告邮件"。
+    tracing::info!("公告邮件群发开始: 收件人 {} 封", emails.len());
+    match state
+        .mailer_service
+        .send_batch(&emails, &mail.subject, &mail.body)
+        .await
+    {
+        Ok(result) => {
+            tracing::info!(
+                "通知公告邮件发送完成: subject={}, total={}, success={}, failed={}",
+                mail.subject,
+                result.total,
+                result.success,
+                result.failed
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "通知公告邮件发送失败: subject={}, error={}",
+                mail.subject,
+                e
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1336,5 +1418,138 @@ mod tests {
         // 时间/标题等无关轴必须为空，否则"全部已读"会跟着筛选条件漏标记
         assert!(f.title.is_none() && f.begin.is_none() && f.end.is_none());
         assert!(f.notice_type.is_none() && f.create_by.is_none());
+    }
+
+    /// b140 形状锁：**公告邮件群发不得挂在请求上**，且 **locale 相关的渲染必须留在
+    /// 请求作用域内**（在 spawn 之前完成）。
+    ///
+    /// 立的案是改造前的 `self.send_notice_email(…).await`：一条 SMTP 批量投递串在
+    /// "新增公告"请求里，而公告行早已提交 ⇒ 请求层超时砍断投递后，操作人看到失败、
+    /// 再点一次就造出重复公告 + 第二轮群发。这条锁判的不是"有没有 await"这种写法，
+    /// 而是**两条承诺**：① 投递经 `spawn_tracked`（超时 + panic 隔离 + 结局指标）；
+    /// ② 渲染点排在派生之前——写反了会静默丢掉双语（后台任务里 `tr!` 落到兜底 locale），
+    /// 而那正是本批最不该有的"改一个缺陷长出一个新缺陷"。
+    #[test]
+    fn notice_email_dispatch_leaves_the_request_path_after_rendering() {
+        let view = crate::common::prod_scan::prod_file(
+            "src/service/sys_notice_service.rs",
+            &crate::common::prod_scan::Scan {
+                comments: crate::common::prod_scan::Comments::Drop,
+                ..Default::default()
+            },
+        )
+        .text();
+
+        let spawn = view
+            .find("spawn_tracked(")
+            .expect("邮件投递必须经 `spawn_tracked`（B.6 统一范式）；裸 `.await` 会挂在请求上");
+        let render = view
+            .find(".render_notice_email(")
+            .expect("主题/正文必须在请求作用域内渲染，否则后台任务拿不到请求 locale");
+        assert!(
+            render < spawn,
+            "渲染必须排在派生**之前**：先 spawn 再渲染 ⇒ `tr!` 在后台线程取到兜底 locale，\
+             双语能力静默丢失"
+        );
+        assert!(
+            view.contains("\"notice_email_dispatch\""),
+            "后台任务必须有可归因的 label，否则 `/metrics` 里只有一句泛泛的 `bg:*` 超时"
+        );
+        // 旧的同步形状不得复活
+        assert!(
+            !view.contains("self.send_notice_email("),
+            "邮件投递不得再挂在 `add_notice` 的请求路径上"
+        );
+        // 预算常量必须真被消费（写了没用 = 没写）
+        assert!(
+            view.contains("NOTICE_EMAIL_BUDGET"),
+            "群发预算必须出现在派生点上，否则超时保护形同虚设"
+        );
+    }
+
+    /// 合成反证：把两条承诺分别改回缺陷形状，判据必须各自抓到（互不顶班）。
+    #[test]
+    fn notice_email_shape_lock_is_falsifiable() {
+        // ① 退回"请求内同步 await"
+        let sync = concat!(
+            "if dto.notify_email { ",
+            "self.send_notice_email(st, tid, title, body).await; }",
+        );
+        assert!(
+            sync.contains("self.send_notice_email(") && !sync.contains("spawn_tracked("),
+            "合成夹具必须真的构成违规形状（否则这条正控是空跑）"
+        );
+
+        // ② 渲染排在派生之后（后台取 locale）——顺序反例必须是**可判**的
+        let wrong_order = concat!(
+            "let host = st.clone();\n",
+            "spawn_tracked(async move { let mail = svc.render_notice_email().await; deliver(mail).await; });\n",
+        );
+        let r = wrong_order
+            .find(".render_notice_email(")
+            .expect("夹具必须含渲染点");
+        let s = wrong_order
+            .find("spawn_tracked(")
+            .expect("夹具必须含派生点");
+        assert!(
+            r > s,
+            "夹具必须把渲染排在派生**之后**，否则它不构成 ① 那条顺序判据的反例"
+        );
+        // 真实现必须落在相反的一侧——两侧都判，才不是"只期望抛错等于没测"
+        let view = crate::common::prod_scan::prod_file(
+            "src/service/sys_notice_service.rs",
+            &crate::common::prod_scan::Scan {
+                comments: crate::common::prod_scan::Comments::Drop,
+                ..Default::default()
+            },
+        )
+        .text();
+        assert!(
+            view.find(".render_notice_email(").unwrap() < view.find("spawn_tracked(").unwrap(),
+            "真实实现的顺序关系必须与反例相反，否则两条判据在同一次改动里一起失效"
+        );
+    }
+
+    /// b140：批量并发度只能由 `MAIL_BATCH_CONCURRENCY` 给——它是 `NOTICE_EMAIL_BUDGET`
+    /// 容量算式的输入，写回字面量会让那条编译期断言量到一个不存在的并发度。
+    #[test]
+    fn mail_batch_concurrency_is_the_single_source() {
+        let view = crate::common::prod_scan::prod_file(
+            "src/service/mailer_service.rs",
+            &crate::common::prod_scan::Scan {
+                comments: crate::common::prod_scan::Comments::Drop,
+                ..Default::default()
+            },
+        )
+        .text();
+        assert!(
+            view.contains(".buffer_unordered(MAIL_BATCH_CONCURRENCY)"),
+            "批量投递并发必须取常量"
+        );
+        assert!(
+            !view.contains("buffer_unordered(5)"),
+            "并发度不得再写回字面量 5：预算容量式读的是常量，两处各写一遍必然漂"
+        );
+    }
+
+    /// b140：批量失败日志不得带收件地址（与本文件单封路径同口径，邮箱属 PII）。
+    #[test]
+    fn batch_send_failure_log_carries_no_recipient() {
+        let view = crate::common::prod_scan::prod_file(
+            "src/service/mailer_service.rs",
+            &crate::common::prod_scan::Scan {
+                comments: crate::common::prod_scan::Comments::Drop,
+                ..Default::default()
+            },
+        )
+        .text();
+        assert!(
+            !view.contains("批量发送邮件失败 to="),
+            "批量失败日志曾逐封打印收件地址，一次群发失败即在日志留下整串个人邮箱"
+        );
+        assert!(
+            view.contains("批量发送邮件失败"),
+            "失败本身仍必须可见（只是不再经由日志泄露地址）——把整句删掉等于把失败藏起来"
+        );
     }
 }

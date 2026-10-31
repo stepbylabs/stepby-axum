@@ -117,21 +117,16 @@ use crate::observability::monitoring_middleware;
 use crate::state::AppState;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderName, HeaderValue, Method};
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::get;
 use std::sync::Arc;
-use std::time::Duration;
-use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 /// 全局默认请求体大小上限（10MB，对齐 oper_log 中间件 BODY_READ_LIMIT）
 pub(crate) const DEFAULT_BODY_LIMIT_BYTES: usize = 10 * 1024 * 1024;
-
-/// 单个请求处理总时长上限（120s，覆盖 Slowloris 慢速攻击与长耗时业务）
-const REQUEST_TIMEOUT_SECS: u64 = 120;
 
 /// 构建完整应用路由
 ///
@@ -376,27 +371,20 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        // Slowloris / 慢速攻击防护：限制单个请求处理总时长（REQUEST_TIMEOUT_SECS），
-        // 超时则中断连接，防止慢速攻击耗尽连接池。
-        // §5.55 收散点：408 补 JSON body——tower_http TimeoutLayer 只能返回裸状态码（API 限制），
-        // 改用 tower::timeout + HandleErrorLayer 组合生成与错误响应契约对齐的 JSON body。
-        // 批七十五 B7：msg 改走 i18n 键（此前是**硬编码中文**，en 用户收到的 408 是中文——
-        // 与 C.8"错误契约统一"直接冲突）；body 形状收进 `common::response::transport_error`，
-        // 与 414/431 同源（HTTP 状态 == body.code，且刻意不经 map_status）。
+        // Slowloris / 慢速攻击防护 + 长任务放行：**按路由分档**的超时中间件（b140）。
+        //
+        // 改造前这里是固定 120s 的 `tower::timeout`，把备份 dump/restore（子进程预算 300s）
+        // 与 IP 库热更新（下载预算 300s）**砍在半截**：`kill_on_drop(true)` 的外部进程在灌
+        // 了一半 SQL 时被杀，而 handler 里紧随其后的 `lock_release` 永不执行。
+        // 档位、派生关系与不登记会怎样，全部写在 `middleware::request_timeout` 模块文档里。
+        //
+        // §5.55 收散点：408 补 JSON body 的形状不变——仍由 `common::response::transport_error`
+        // 产出（与 414/431 同源，HTTP 状态 == body.code，刻意不经 map_status）。
         // 层级可行性：locale 中间件写在本层**之外**（`.layer` 后添加的先执行），
         // 故超时时 `crate::tr!` 已能吃到协商好的 locale。
-        .layer(
-            ServiceBuilder::new()
-                .layer(axum::error_handling::HandleErrorLayer::new(
-                    |_: axum::BoxError| async {
-                        crate::common::response::transport_error(
-                            StatusCode::REQUEST_TIMEOUT,
-                            crate::tr!("error.common.request_timeout"),
-                        )
-                    },
-                ))
-                .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS)),
-        )
+        .layer(axum::middleware::from_fn(
+            crate::middleware::request_timeout::request_timeout_guard,
+        ))
         // 可观测性监控中间件（metrics + 慢请求）：
         // 置于 request_id 之内、Timeout 之外，既能在 request span 作用域内测量，
         // 又能覆盖到真实处理耗时（含 Timeout 以内的全部中间件 + handler）。

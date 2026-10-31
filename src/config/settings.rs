@@ -2228,7 +2228,8 @@ fn default_db_slow_sql_threshold_ms() -> u64 {
 ///
 /// 于是把 `statement_timeout_secs` 写成 `u64::MAX` 这类脏值 ⇒ `SET SESSION` / GUC 越界
 /// ⇒ 连接池**全灭** ⇒ 全站 503，而归因链上没有任何一处写着"配置"。真需要更长的语句请
-/// 显式配 `0`（关闭），路由层 120s 兜底超时仍在（见 `db::pool` 的 MySQL 引擎限制说明）。
+/// 显式配 `0`（关闭），路由层兜底超时仍在（默认档 120s；确实需要更长的同步长任务请走
+/// `middleware::request_timeout` 的长任务档登记，见 `db::pool` 的 MySQL 引擎限制说明）。
 const DB_STATEMENT_TIMEOUT_MAX_SECS: u64 = 3600;
 
 impl DatabaseConfig {

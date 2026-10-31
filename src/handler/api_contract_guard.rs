@@ -5,9 +5,13 @@
 //! 1. **错误/成功体契约**（C.8）：handler 不得手搓 `{"code":200,"msg":"ok"}`，
 //!    也不得把返回类型写成 `Result<Json<serde_json::Value>, _>`。手搓体绕过 i18n、
 //!    绕过 `trace_id`，而且让"契约守卫"永远看不见这一族端点（`data_rule_handler` 两处即此形）。
-//! 2. **凭据列不得进无关链路**（§一.16）：`sys_user::Entity::find()` 未接 `select_only`
-//!    就把行取出来，会把整行读进内存——含 `password` 的 argon2 摘要。群发/搜索/仪表盘三类聚合只需要两三个字段，
+//! 2. **凭据列不得进无关链路**（§一.16）：`sys_user` 的 `Entity::find()` 未接投影
+//!    就把**列表行**取出来，会把整行读进内存——含 `password` 的 argon2 摘要。群发/搜索/仪表盘三类聚合只需要两三个字段，
 //!    凭据摘要出现在这些链路里没有任何功能理由，只有泄露理由（将来加一行日志或一次序列化就是事故）。
+//!    接收者**由导入行派生**（`Entity as SysUser` 这一形态旧实现结构上打不中，b140 补面当天
+//!    抓到 3 处真实未投影读）；取列表的形态含 `.all(` / `.paginate(` / 仓储的 `find_many(`·
+//!    `find_many_conn(`（第三种把执行藏在别人的调用里）。整行读唯一的合法宿主是
+//!    `src/repository/**` 里签名声明 `-> …Model…` 的查询 API——那是它声明的契约，不是豁免名单。
 //! 3. **绝对路径折叠只许有『一处实现 + 一处刻意独立的出口探针』**（C.9）：正则实现只能住在
 //!    `common::redact`；`/health` 出口侧允许一条**故意不复用** sanitizer 的独立断言
 //!    （复用会让"sanitizer 失效"与"探针通过"同时成立＝自证清白的虚锁）。
@@ -67,35 +71,250 @@ mod api_contract_mod {
         hits
     }
 
-    /// 判据 2：`sys_user::Entity::find()` 在**取行**（`.all(...)`）前未接 `select_only`
+    /// 本文件里所有"指向 `sys_user` 的 `Entity`"的接收者写法。
     ///
-    /// 只 `.count(...)` 的语句不取行 ⇒ 不算违规（凭据列不会进内存）。
-    /// 推进必须逐条走到"本条语句的第一个终结调用"再继续：遇到 count 就 `break` 会把
-    /// 同文件后面所有未投影取行**整体吞掉**（控制组 ④ 正是为这条路径而存在——
-    /// 初版就是这么漏的，被自己的控制组抓回，同 §测试门禁"回归锁必须变异证伪"）。
-    fn unprojected_user_loads(text: &str) -> Vec<String> {
-        let mut hits = Vec::new();
-        let pat = "sys_user::Entity::find()";
+    /// **为什么需要这一层**（b140 立案）：判据 2 原先只匹配字面 `sys_user::Entity::find()`，
+    /// 而仓里普遍写 `use crate::entity::sys_user::{Column as UserColumn, Entity as SysUser}`
+    /// ⇒ `SysUser::find()` 这种形态**结构上永远打不中**。报表看板的"用户增长"数据源就是这样
+    /// 把 sys_user 整行（含 `password` 的 argon2 摘要）读进内存、而门禁一路绿灯的——
+    /// 与 AGENTS「字符串形状锁看不见 `format!` 模板」是同一条纪律的别名面。
+    fn sys_user_entity_receivers(text: &str) -> Vec<String> {
+        let mut names = vec!["sys_user::Entity".to_string()];
+        // needle 之后必须**不是标识符字符**：`entity::sys_user` 是 `entity::sys_user_role`
+        // / `entity::sys_user_dept` / `entity::sys_user_credential` 的**前缀**，按子串扫会把
+        // 别家实体的别名登记成本判据的接收者 —— 实测一次产出 6 处假违规（sys_role.rs 的
+        // `SysUserRole::find()` 首当其冲）。方向是"宁可少认别名"也不得多认：多认会把
+        // 无关读路径判成凭据面缺陷，人照着提示去投影列就是改错地方的产品码。
+        const NEEDLE: &str = "entity::sys_user";
+        let is_ident_start =
+            |c: Option<char>| matches!(c, Some(ch) if ch.is_ascii_alphanumeric() || ch == '_');
         let mut rest = text;
-        let mut line_no = 1usize;
-        while let Some(pos) = rest.find(pat) {
-            line_no += rest[..pos].matches('\n').count();
-            let tail = &rest[pos + pat.len()..];
-            let end_all = tail.find(".all(");
-            let end_count = tail.find(".count(");
-            let next = match (end_all, end_count) {
-                (Some(a), Some(c)) => a.min(c),
-                (Some(a), None) => a,
-                (None, Some(c)) => c,
-                (None, None) => break,
-            };
-            let takes_rows = end_all == Some(next);
-            if takes_rows && !tail[..next].contains("select_only") {
-                hits.push(format!("第 {line_no} 行附近 {pat} 未投影就 .all()"));
+        while let Some(pos) = rest.find(NEEDLE) {
+            let after = &rest[pos + NEEDLE.len()..];
+            if is_ident_start(after.chars().next()) {
+                rest = after;
+                continue;
             }
-            rest = &tail[next..];
+            let tail = after;
+            // 只在本条 use 语句的范围内找花括号（越过 `;` 就是下一条语句了）
+            let stmt_end = tail.find(';').unwrap_or(tail.len());
+            let stmt = &tail[..stmt_end];
+            if let Some(open) = stmt.find('{') {
+                // 闭括号只能在**开括号之后**找：在整条语句里找 `}` 会命中上一条语句留下的
+                // 那个（`rest` 是从分号之后继续扫的，起点前可能还有未配平的 `}`），
+                // 于是 `start > end` ⇒ panic「byte range starts at 189 but ends at 82」。
+                // 判据源里 panic 的症状是"整把锁不再产出结论"，比误报更坏。
+                let body = &stmt[open + 1..];
+                let inner = &body[..body.find('}').unwrap_or(body.len())];
+                for item in inner.split(',') {
+                    let item = item.trim();
+                    let Some((src, alias)) = item.split_once(" as ") else {
+                        continue;
+                    };
+                    if src.trim() == "Entity" && !alias.trim().is_empty() {
+                        names.push(alias.trim().to_string());
+                    }
+                }
+            } else if let Some(single) = stmt.strip_prefix("::Entity") {
+                // `use crate::entity::sys_user::Entity as SysUser;` / `::Entity;`
+                let head = single.split(';').next().unwrap_or("");
+                if let Some((_, alias)) = head.split_once(" as ") {
+                    if !alias.trim().is_empty() {
+                        names.push(alias.trim().to_string());
+                    }
+                } else {
+                    names.push("Entity".to_string());
+                }
+            }
+            rest = &tail[stmt_end..];
         }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// 判据 2：`sys_user` 的 `Entity::find()` 在**取列表行**前未接投影
+    ///
+    /// 取列表行的形态有三种（实测全集）：`.all(..)` / `.paginate(..)` / 仓储的
+    /// `find_many(..)`·`find_many_conn(..)`——第三种最隐蔽，因为它把执行写在了
+    /// **另一个人的调用**里（`sys_dept_service` 部门删除前的用户计数即此形）。
+    /// 只 `.one(..)`/`.count(..)`/`.exists(..)` 的语句不取列表 ⇒ 不算违规。
+    ///
+    /// **作用域边界（必须是结构事实，不是字符串白名单）**：整行读只有一个合法宿主——
+    /// `src/repository/**` 里那些**签名把 `Model` 交给调用方**的查询 API。那是它声明的契约
+    /// （消费方随后映射成 Vo），而 service/handler 侧的临时聚合取数没有这个理由。
+    /// 两个条件同时成立才豁免，缺一个照旧红：只按签名 exempt 会让任何文件写 `-> Vec<Model>`
+    /// 就绕过判据；只按目录 exempt 会让仓储里不返回 Model 的聚合读（本批实测 2 处）被藏起来。
+    ///
+    /// 推进必须逐条走到"本条 find 的终结调用"再继续：遇到 count 就 `break` 会把同文件后面
+    /// 所有未投影取行**整体吞掉**（控制组 ④ 正是为这条路径而存在——初版就是这么漏的，
+    /// 被自己的控制组抓回，同 §测试门禁"回归锁必须变异证伪"）。
+    /// 区间还必须停在**下一个 `::find(`** 之前：同一个函数里常有第二条查询（dashboard 的
+    /// `join!` 五个 `async {}` 块），越过它去找终结调用会把别人的 `.all(` 算成本条的结局。
+    fn unprojected_user_loads(rel: &str, text: &str) -> Vec<String> {
+        /// 取列表行的终结形态
+        const ROW_LIST_FORMS: &[&str] = &[".all(", ".paginate(", "find_many(", "find_many_conn("];
+        /// 投影形态（本仓实测用到的全部四种 + `select_only` 前置）
+        const PROJECTION_FORMS: &[&str] = &[
+            "select_only",
+            "into_tuple",
+            "into_model",
+            "into_json",
+            ".column(",
+            ".select(",
+        ];
+        let receivers = sys_user_entity_receivers(text);
+        let items = fn_item_ranges(text);
+        // 所有实体的 `::find(` 出现位置（升序）：用作**区间终点**。
+        // 不切"到下一个 sys_user 的 find"，因为中间可能夹着别的实体的链——
+        // 那半条链里的 `select_only` 会把本条的未投影洗成"已投影"（假绿方向，比误报坏）。
+        let mut find_marks: Vec<usize> = Vec::new();
+        {
+            let mut from = 0usize;
+            while let Some(p) = text[from..].find("::find(") {
+                find_marks.push(from + p);
+                from = from + p + 1;
+            }
+        }
+        let mut hits = Vec::new();
+        for pat in receivers {
+            let needle = format!("{pat}::find()");
+            let mut sites: Vec<usize> = Vec::new();
+            {
+                let mut from = 0usize;
+                while let Some(p) = text[from..].find(&needle) {
+                    sites.push(from + p);
+                    from = from + p + 1;
+                }
+            }
+            for abs in sites {
+                let line_no = text[..abs].matches('\n').count() + 1;
+                let after = abs + needle.len();
+                let tail = &text[after..];
+                let next_mark = find_marks
+                    .iter()
+                    .find(|m| **m >= after)
+                    .map(|m| m - after)
+                    .unwrap_or(tail.len());
+                let item = items.iter().find(|(s, e, _)| *s <= abs && abs < *e);
+                let fn_end = item
+                    .map(|(_, e, _)| (*e).saturating_sub(after))
+                    .unwrap_or(tail.len());
+                let region_end = next_mark.min(fn_end).min(tail.len());
+                let region = &tail[..region_end];
+                let term = ROW_LIST_FORMS
+                    .iter()
+                    .filter_map(|f| region.find(*f).map(|p| (p, *f)))
+                    .min_by_key(|(p, _)| *p);
+                if let Some((n, form)) = term {
+                    let between = &region[..n];
+                    if !PROJECTION_FORMS.iter().any(|p| between.contains(p)) {
+                        // 豁免条件：仓储层 + 本条所在函数的签名声明把 Model 交给调用方
+                        let in_repo = rel.starts_with("src/repository/");
+                        let model_contract = item.is_some_and(|(_, _, sig)| sig.contains("Model"));
+                        if !(in_repo && model_contract) {
+                            let (file_line, excerpt) = real_line_of(rel, text, line_no);
+                            hits.push(format!(
+                                "{file_line} 行 `{needle}` 未投影就取列表行（{form}）⇒ \
+                                 加 select_only/column/into_tuple，或把存在性判定下推 SQL\
+                                 [视图行 {line_no}｜原文 `{excerpt}`｜豁免仅限仓储的 Model \
+                                 契约函数：in_repo={in_repo} model_contract={model_contract}]"
+                            ));
+                        }
+                    }
+                }
+                // 无终结形态 = 单行读 / 只计数 / builder 在本文件内不取行 ⇒ 本判据不管
+            }
+        }
+        hits.sort();
         hits
+    }
+
+    /// 按"顶层 item 边界"切出的函数区间：`(函数头字节偏移, 区间末尾字节偏移, 签名字节串)`。
+    ///
+    /// 边界取 `fn_def_name` 认定的函数头 + 花括号配平（与 `fn_body` 同一把尺，不另写一份），
+    /// 而不是"到下一个 `;`"：本仓把查询 builder 存进变量的写法（`let mut query = X::find();`）
+    /// 其后还有若干条 `query = query.filter(..);`，用 `;` 截断会把合法形态判成"终结调用
+    /// 静态判不到"（实测 10 处噪声，全是 dashboard 的 count 聚合——那是每轮产出噪声的负资产）。
+    fn fn_item_ranges(text: &str) -> Vec<(usize, usize, String)> {
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        let mut starts: Vec<usize> = Vec::new();
+        for line in text.split_inclusive('\n') {
+            if fn_def_name(line).is_some() {
+                starts.push(offset);
+            }
+            offset += line.len();
+        }
+        for start in starts {
+            // 花括号配平求函数体末尾
+            let bytes = &text[start..];
+            let mut depth = 0i32;
+            let mut opened = false;
+            let mut end = bytes.len();
+            for (k, ch) in bytes.char_indices() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    '}' => {
+                        depth -= 1;
+                        if opened && depth <= 0 {
+                            end = k + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let stop = start + end;
+            // 签名 = 头行到第一个 `{`（返回类型就在这一段里）
+            let head = &text[start..stop];
+            let sig = match head.find('{') {
+                Some(c) => head[..c].to_string(),
+                None => head.to_string(),
+            };
+            out.push((start, stop, sig));
+        }
+        out
+    }
+
+    /// 把"注释行不计"的视图行号换算成**真实文件行号**，并带上该行的原文片段。
+    ///
+    /// 本锁用 `Comments::Drop`（判据按语句序列匹配，注释会引用被禁写法），于是视图行号必然
+    /// 早于文件行号——实测偏差 0～105 行不等。文案里的行号若不换算，人照着改就会改到别处
+    /// （§测试门禁 ⑨"错误提示把人支使去把事实签反"在**定位**面上的形状）。
+    /// 换算尺：视图里那一行的**去空白原文**去真实文件按序匹配（同第 k 次出现对第 k 次），
+    /// 匹配不到（合成夹具、行被折行）⇒ 退回视图行号并在片段里给出原文，不假装精确。
+    fn real_line_of(rel: &str, text: &str, view_line: usize) -> (usize, String) {
+        let view = text
+            .split('\n')
+            .nth(view_line.saturating_sub(1))
+            .unwrap_or("");
+        let probe = view.trim().to_string();
+        let excerpt: String = probe.chars().take(72).collect();
+        if probe.is_empty() {
+            return (view_line, excerpt);
+        }
+        let rank = text
+            .split('\n')
+            .take(view_line - 1)
+            .filter(|l| l.trim() == probe)
+            .count();
+        let raw = match std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel),
+        ) {
+            Ok(raw) => raw,
+            Err(_) => return (view_line, excerpt),
+        };
+        let hit = raw
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.trim() == probe)
+            .nth(rank)
+            .map(|(i, _)| i + 1);
+        (hit.unwrap_or(view_line), excerpt)
     }
 
     /// 判据 3：绝对路径正则的实现点计数（盘符字符类是这类正则的必经形态，
@@ -796,7 +1015,7 @@ mod api_contract_mod {
     fn user_table_reads_must_project_columns() {
         let mut all: Vec<String> = Vec::new();
         for (rel, text) in data_layer_files() {
-            for h in unprojected_user_loads(&text) {
+            for h in unprojected_user_loads(&rel, &text) {
                 all.push(format!("{rel}: {h}"));
             }
         }
@@ -1266,6 +1485,9 @@ mod api_contract_mod {
 
     #[test]
     fn projection_guard_catches_synthetic_violation() {
+        // 采集面按"文件 + 文本"两维判：豁免条件里有一维是目录，所以合成夹具必须显式给 rel。
+        // 一律用 service 侧路径——它是"必须报"的那一侧，写成 repository 会把该报的洗成不报。
+        let svc = "src/service/synth_case.rs";
         // ① 未投影就取行 ⇒ 必须报
         let bad = concat!(
             "let rows = sys_user::Entity::find()\n",
@@ -1274,10 +1496,10 @@ mod api_contract_mod {
             "    .await?;\n",
         );
         assert_eq!(
-            unprojected_user_loads(bad).len(),
+            unprojected_user_loads(svc, bad).len(),
             1,
             "合成未投影取行必须被抓到，实际: {:?}",
-            unprojected_user_loads(bad)
+            unprojected_user_loads(svc, bad)
         );
         // ② 投影后取行 ⇒ 不报（判据不是"禁止查用户表"）
         let good = concat!(
@@ -1287,7 +1509,10 @@ mod api_contract_mod {
             "    .all(db)\n",
             "    .await?;\n",
         );
-        assert!(unprojected_user_loads(good).is_empty(), "投影形态被误报");
+        assert!(
+            unprojected_user_loads(svc, good).is_empty(),
+            "投影形态被误报"
+        );
         // ③ 只 count 不取行 ⇒ 不报（凭据列不进内存）
         let count_only = concat!(
             "let n = sys_user::Entity::find()\n",
@@ -1296,16 +1521,138 @@ mod api_contract_mod {
             "    .await?;\n",
         );
         assert!(
-            unprojected_user_loads(count_only).is_empty(),
+            unprojected_user_loads(svc, count_only).is_empty(),
             "count 形态被误报（不取行，无泄露面）"
         );
         // ④ 同文件里"先投影取行、后 count"混合：投影那条不报、未投影那条报
         let mixed = format!("{good}{count_only}{bad}");
         assert_eq!(
-            unprojected_user_loads(&mixed).len(),
+            unprojected_user_loads(svc, &mixed).len(),
             1,
             "混合形态必须逐条定位，实际: {:?}",
-            unprojected_user_loads(&mixed)
+            unprojected_user_loads(svc, &mixed)
+        );
+        // ⑤ **别名形态**（b140 立案的真实形状）：文件把 `Entity as SysUser` 导入后写
+        // `SysUser::find()`，旧实现只认字面 `sys_user::Entity::find()` ⇒ 结构上永远打不中，
+        // 报表看板"用户增长"就是靠这一形状把 password 摘要读进内存而门禁恒绿。
+        let alias_import =
+            "use crate::entity::sys_user::{Column as UserColumn, Entity as SysUser};\n";
+        let alias_bad = concat!(
+            "let rows = SysUser::find()\n",
+            "    .filter(UserColumn::DelFlag.ne(\"2\"))\n",
+            "    .all(db)\n",
+            "    .await?;\n",
+        );
+        assert_eq!(
+            unprojected_user_loads(svc, &format!("{alias_import}{alias_bad}")).len(),
+            1,
+            "别名形态的未投影取行必须被抓到，实际: {:?}",
+            unprojected_user_loads(svc, &format!("{alias_import}{alias_bad}"))
+        );
+        // ⑥ 别名 + 投影 ⇒ 不报（补面不得顺手把合法形态判红）
+        let alias_good = concat!(
+            "let rows = SysUser::find()\n",
+            "    .select_only()\n",
+            "    .column(UserColumn::CreateTime)\n",
+            "    .all(db)\n",
+            "    .await?;\n",
+        );
+        assert!(
+            unprojected_user_loads(svc, &format!("{alias_import}{alias_good}")).is_empty(),
+            "别名的投影形态被误报"
+        );
+        // ⑦ **别名的归属必须由导入行给**：另一个模块的 `Entity as SysNotice` 不得被算成
+        // sys_user 的接收者（否则这条锁会把任何"取别的表整行"判成凭据泄露，误报一片→被放宽）。
+        let other_import =
+            "use crate::entity::sys_notice::{Column as NColumn, Entity as SysNotice};\n";
+        let other_load = concat!(
+            "let rows = SysNotice::find()\n",
+            "    .filter(NColumn::Status.eq(\"0\"))\n",
+            "    .all(db)\n",
+            "    .await?;\n",
+        );
+        assert!(
+            unprojected_user_loads(svc, &format!("{other_import}{other_load}")).is_empty(),
+            "别的实体的整行读不得报成 sys_user 凭据面，实际: {:?}",
+            unprojected_user_loads(svc, &format!("{other_import}{other_load}"))
+        );
+        // ⑧ 活体正控：判据源里必须真的有"带花括号的别名导入"这一形状被识别出来，
+        // 否则 ⑤ 可能只是碰巧命中默认接收者（解析器坏了与结论对过是两件事）
+        let receivers = sys_user_entity_receivers(alias_import);
+        assert!(
+            receivers.iter().any(|r| r == "SysUser"),
+            "花括号里的 `Entity as SysUser` 必须被登记为接收者，实际: {receivers:?}"
+        );
+        assert!(
+            sys_user_entity_receivers("use crate::entity::sys_user::Entity as PatOwner;\n")
+                .iter()
+                .any(|r| r == "PatOwner"),
+            "单item 形态的别名同样要登记，否则该形状仍是盲区"
+        );
+        // ⑨ 语句范围没有分号收尾时的边界（文档提及、宏体里的路径都长这样）：范围只能取到
+        // 文本末尾，于是其间**既有上一条构造留下的 `}`，又有后面的 `{`**。本批实测在此
+        // panic「byte range starts at 189 but ends at 82」——判据源里 panic 的症状不是误报，
+        // 而是整把锁从此不再产出结论（比误报更坏，因为它长得像"没跑到"）。
+        let unterminated = concat!(
+            "// 见 crate::entity::sys_user 的说明\n",
+            "fn done() {}\n",
+            "fn open() { SysUser::find().all(db).await? }\n",
+        );
+        assert_eq!(
+            sys_user_entity_receivers(unterminated),
+            vec!["sys_user::Entity".to_string()],
+            "未终止的提及不得被猜成别名（反向切片 panic、顺带登记垃圾别名都是坏法）"
+        );
+        // ⑩ **builder 存进变量、执行写在别人的调用里**（本批补面在 `sys_dept_service` 抓到的
+        // 真实形状）：区间尺取到函数末尾时，`find_many_conn` 就是终结调用。旧实现只认
+        // `.all(`/`.count(` ⇒ 这一支结构上永远打不中，而它确实把整行读进了内存只为数个数。
+        let builder_conn = concat!(
+            "async fn check(dept_id: i64) -> Result<(), ServiceError> {\n",
+            "    let user_select = SysUser::find()\n",
+            "        .filter(UserColumn::DeptId.eq(dept_id));\n",
+            "    let n = base.find_many_conn(txn, user_select).await?.len();\n",
+            "    Ok(())\n}\n",
+        );
+        assert_eq!(
+            unprojected_user_loads(svc, &format!("{alias_import}{builder_conn}")).len(),
+            1,
+            "变量 builder 经 find_many_conn 取列表必须被抓到，实际: {:?}",
+            unprojected_user_loads(svc, &format!("{alias_import}{builder_conn}"))
+        );
+        // ⑪ **豁免是两维的，少一维不得生效**：同一段 Model 契约函数，放在 repository 里不报、
+        // 放在 service 里必须报。只按签名豁免 ⇒ 任何文件写 `-> Vec<Model>` 就绕过判据；
+        // 只按目录豁免 ⇒ 仓储里不返回 Model 的聚合读被藏起来。两个方向各一条。
+        let model_api = concat!(
+            "pub async fn find_page(&self) -> Result<(Vec<Model>, u64), DbErr> {\n",
+            "    let rows = SysUser::find().filter(Column::DelFlag.eq(\"0\")).all(db).await?;\n",
+            "    Ok((rows, 0))\n}\n",
+        );
+        assert!(
+            unprojected_user_loads(
+                "src/repository/sys_user.rs",
+                &format!("{alias_import}{model_api}")
+            )
+            .is_empty(),
+            "仓储的 Model 契约函数被误报（那是它声明的返回类型，消费方映射成 Vo）"
+        );
+        assert_eq!(
+            unprojected_user_loads(svc, &format!("{alias_import}{model_api}")).len(),
+            1,
+            "同样的 Model 签名写在 service 侧必须照报，否则豁免退化成'写个类型注解就过关'"
+        );
+        // ⑫ 同一个函数里两条查询：第一条 `.one()` 单行、第二条未投影取列表 ⇒ 只报第二条。
+        // 区间尺若停在"第一个终结调用"就会把第二条整体吞掉（与 ④ 同族，方向相反）。
+        let two_queries = concat!(
+            "async fn both(id: i64) {\n",
+            "    let one = SysUser::find().filter(UserColumn::UserId.eq(id)).one(db).await?;\n",
+            "    let rows = SysUser::find().filter(UserColumn::DeptId.eq(id)).all(db).await?;\n",
+            "}\n",
+        );
+        let two_hits = unprojected_user_loads(svc, &format!("{alias_import}{two_queries}"));
+        assert_eq!(
+            two_hits.len(),
+            1,
+            "同函数第二条未投影取列表不得被第一条洗掉，实际: {two_hits:?}"
         );
     }
 

@@ -33,8 +33,12 @@ use crate::repository::sys_backup_log::SysBackupLogRepository;
 
 // ==================== 常量 ====================
 
-/// 子进程超时时间（5 分钟），避免恶意大库阻塞后端
-const BACKUP_TIMEOUT_SECS: u64 = 300;
+/// 子进程超时时间（5 分钟），避免恶意大库阻塞后端。
+///
+/// `pub` 的理由：它是**请求层超时档的派生输入**（见 `middleware::request_timeout`）。
+/// 留成私有常量会让那一层"记一个数"而不是"读一个事实"，而本仓反复的教训是
+/// 记下来的数字迟早与它声称的那个预算脱钩（AGENTS 测试门禁 ㉘/⑰ 同族）。
+pub const BACKUP_TIMEOUT_SECS: u64 = 300;
 
 /// 备份文件存储子目录（相对工作目录）
 const BACKUP_DIR: &str = "backups";

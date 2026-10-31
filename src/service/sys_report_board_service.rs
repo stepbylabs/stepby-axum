@@ -524,6 +524,12 @@ impl SysReportBoardService {
 
     /// 用户增长（每日新增用户数；与 dashboard/报表快照 user_stats 同口径：
     /// del_flag != '2' 的 sys_user 按 create_time 日期分组，缺数日期补 0）
+    ///
+    /// **列投影**（b140，与 `sys_notice_service::find_active_user_email_pairs` 的 b74 §一.16
+    /// 同一口径）：本函数只需要 `create_time` 一列做按日计数，而未投影的 `find()` 会把
+    /// **整行**读进内存——含 `password` 的 argon2 摘要与手机号/邮箱。凭据摘要没有任何理由
+    /// 出现在一条趋势查询的内存里（同一条链路将来加日志或序列化就是凭据外泄面），
+    /// 且窗口内每行都读全部列纯属浪费。
     async fn src_user_growth(
         &self,
         days: i64,
@@ -533,19 +539,26 @@ impl SysReportBoardService {
         let start_date = today - Duration::days(days - 1);
         let begin = start_date.and_time(NaiveTime::MIN);
 
+        // 只取投影列：(create_time) 的元组，而不是 Model
         let mut query = SysUser::find()
+            .select_only()
+            .column(UserColumn::CreateTime)
             .filter(UserColumn::DelFlag.ne("2"))
             .filter(UserColumn::CreateTime.gte(begin));
         if let Some(tid) = tenant {
             query = query.filter(UserColumn::TenantId.eq(tid));
         }
-        let rows = query.all(&self.db).await?;
+        let create_times: Vec<chrono::NaiveDateTime> = query
+            .into_tuple::<Option<chrono::NaiveDateTime>>()
+            .all(&self.db)
+            .await?
+            .into_iter()
+            .flatten()
+            .collect();
 
         let mut map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        for u in &rows {
-            if let Some(ct) = u.create_time {
-                *map.entry(ct.format("%Y-%m-%d").to_string()).or_insert(0) += 1;
-            }
+        for ct in &create_times {
+            *map.entry(ct.format("%Y-%m-%d").to_string()).or_insert(0) += 1;
         }
         Ok((0..days)
             .map(|i| {

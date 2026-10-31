@@ -340,10 +340,23 @@ pub async fn chunk_abort(
     AxumPath(session_id): AxumPath<String>,
 ) -> Result<AjaxResult<()>, AppError> {
     validate_session_id(&session_id)?;
-    let _ = state
+    // b140：失效结果必须可见。此前是裸 `let _ =`——分片目录随后被清掉，而会话键残留到 TTL，
+    // 于是"键在、分片没了"的不一致态整段无人知晓：用户重新发起同一会话的 complete 会得到
+    // 一个无法归因的失败，而日志里连一条痕迹都没有（b90 §4 同族第三面：判据不是"这算不算
+    // 错误"，而是"失败之后谁能看见什么"）。方向取 WARN 而非 500：放弃动作的**主要**意图
+    // （不再占用暂存分片）已经达成，把它报成失败会让人以为还得再点一次"放弃"。
+    // 键名不进日志（可能含会话标识，C.9）。
+    if let Err(e) = state
         .store
         .del(&[ChunkSession::store_key(operator.tenant_id(), &session_id)])
-        .await;
+        .await
+    {
+        tracing::warn!(
+            error = %e,
+            tenant_id = operator.tenant_id(),
+            "分片会话键失效失败：暂存分片已清理，会话键将保留到 TTL 自然过期"
+        );
+    }
     let root = resolve_upload_dir("uploads").await;
     cleanup_chunk_dir(&chunk_dir(&root, operator.tenant_id(), &session_id)).await;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))

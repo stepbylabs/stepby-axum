@@ -11,6 +11,8 @@ pub mod platform_guard;
 pub mod pwd_gate;
 pub mod rate_limit;
 pub mod request_id;
+/// 请求层超时：**按路由分档**（b140，见模块文档的立案事实）
+pub mod request_timeout;
 pub mod response_cache;
 pub mod security_headers;
 pub mod spa_fallback;

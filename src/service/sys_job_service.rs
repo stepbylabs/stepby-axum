@@ -982,81 +982,6 @@ impl SysJobService {
     }
 }
 
-// ==================== 单元测试 ====================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_calc_next_valid_time_valid() {
-        // 标准 5 段 cron（cron crate 默认 5 段：分 时 日 月 周）
-        let result = calc_next_valid_time("0 * * * * *");
-        // 验证有效 cron 表达式应返回 Some（避免 if let 静默通过 None）
-        assert!(
-            result.is_some(),
-            "有效 cron 表达式 '0 * * * * *' 应返回 Some"
-        );
-        // 6 段 cron（含秒）或 5 段 cron，只要能解析就返回 Some
-        if let Some(time) = result {
-            assert!(time.contains(":"));
-            // 时间格式应为 "YYYY-MM-DD HH:MM:SS"
-            assert_eq!(
-                time.len(),
-                19,
-                "时间格式应为 YYYY-MM-DD HH:MM:SS（19 字符）"
-            );
-        }
-    }
-
-    #[test]
-    fn test_calc_next_valid_time_invalid() {
-        let result = calc_next_valid_time("invalid cron expression");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_calc_next_valid_time_matches_scheduler_contract() {
-        // 种子 crons（Quartz 风格）在 API 侧也必须算得出下次时间，否则"启用任务"会先被
-        // 本 service 的 `calc_next_valid_time(...).is_none()` 分支拒绝，与调度器能力不一致。
-        assert!(calc_next_valid_time("0/10 * * * * ?").is_some());
-        assert!(calc_next_valid_time("0 0 3 * * ?").is_some());
-        // 5 字段在调度器装载侧必失败，API 侧不得再放行（口径单一事实源）。
-        assert!(calc_next_valid_time("0 3 * * *").is_none());
-    }
-
-    #[test]
-    fn test_job_vo_from_model() {
-        let job = SysJobModel {
-            tenant_id: 0,
-            job_id: 1,
-            job_name: "test".to_string(),
-            job_group: "DEFAULT".to_string(),
-            invoke_target: "demoTask.demoNoParams".to_string(),
-            cron_expression: Some("0 * * * * *".to_string()),
-            misfire_policy: Some("3".to_string()),
-            concurrent: Some("1".to_string()),
-            status: Some("0".to_string()),
-            create_by: None,
-            create_time: None,
-            update_by: None,
-            update_time: None,
-            remark: None,
-            del_flag: Some("0".to_string()),
-        };
-
-        let vo = JobVo::from_model(job);
-        assert_eq!(vo.job.job_id, 1);
-        // 验证 from_model 正确传递 job 各字段
-        assert_eq!(vo.job.job_name, "test");
-        assert_eq!(vo.job.invoke_target, "demoTask.demoNoParams");
-        assert_eq!(vo.job.cron_expression, Some("0 * * * * *".to_string()));
-        assert_eq!(vo.job.status, Some("0".to_string()));
-        // next_valid_time 可能是 Some 或 None（取决于 cron 是否可解析）
-        // 但 from_model 不应改变 job 原始字段
-    }
-}
-
 // ==================== G-09：运行统计报表 VO 与聚合 ====================
 
 /// 运行报表单日聚合桶
@@ -1336,5 +1261,80 @@ mod job_stats_tests {
         assert_eq!(rate_percent(1, 3), 33.3);
         assert_eq!(rate_percent(2, 3), 66.7);
         assert_eq!(rate_percent(3, 3), 100.0);
+    }
+}
+
+// ==================== 单元测试 ====================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calc_next_valid_time_valid() {
+        // 标准 5 段 cron（cron crate 默认 5 段：分 时 日 月 周）
+        let result = calc_next_valid_time("0 * * * * *");
+        // 验证有效 cron 表达式应返回 Some（避免 if let 静默通过 None）
+        assert!(
+            result.is_some(),
+            "有效 cron 表达式 '0 * * * * *' 应返回 Some"
+        );
+        // 6 段 cron（含秒）或 5 段 cron，只要能解析就返回 Some
+        if let Some(time) = result {
+            assert!(time.contains(":"));
+            // 时间格式应为 "YYYY-MM-DD HH:MM:SS"
+            assert_eq!(
+                time.len(),
+                19,
+                "时间格式应为 YYYY-MM-DD HH:MM:SS（19 字符）"
+            );
+        }
+    }
+
+    #[test]
+    fn test_calc_next_valid_time_invalid() {
+        let result = calc_next_valid_time("invalid cron expression");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_calc_next_valid_time_matches_scheduler_contract() {
+        // 种子 crons（Quartz 风格）在 API 侧也必须算得出下次时间，否则"启用任务"会先被
+        // 本 service 的 `calc_next_valid_time(...).is_none()` 分支拒绝，与调度器能力不一致。
+        assert!(calc_next_valid_time("0/10 * * * * ?").is_some());
+        assert!(calc_next_valid_time("0 0 3 * * ?").is_some());
+        // 5 字段在调度器装载侧必失败，API 侧不得再放行（口径单一事实源）。
+        assert!(calc_next_valid_time("0 3 * * *").is_none());
+    }
+
+    #[test]
+    fn test_job_vo_from_model() {
+        let job = SysJobModel {
+            tenant_id: 0,
+            job_id: 1,
+            job_name: "test".to_string(),
+            job_group: "DEFAULT".to_string(),
+            invoke_target: "demoTask.demoNoParams".to_string(),
+            cron_expression: Some("0 * * * * *".to_string()),
+            misfire_policy: Some("3".to_string()),
+            concurrent: Some("1".to_string()),
+            status: Some("0".to_string()),
+            create_by: None,
+            create_time: None,
+            update_by: None,
+            update_time: None,
+            remark: None,
+            del_flag: Some("0".to_string()),
+        };
+
+        let vo = JobVo::from_model(job);
+        assert_eq!(vo.job.job_id, 1);
+        // 验证 from_model 正确传递 job 各字段
+        assert_eq!(vo.job.job_name, "test");
+        assert_eq!(vo.job.invoke_target, "demoTask.demoNoParams");
+        assert_eq!(vo.job.cron_expression, Some("0 * * * * *".to_string()));
+        assert_eq!(vo.job.status, Some("0".to_string()));
+        // next_valid_time 可能是 Some 或 None（取决于 cron 是否可解析）
+        // 但 from_model 不应改变 job 原始字段
     }
 }

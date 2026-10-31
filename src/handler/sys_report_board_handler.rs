@@ -185,6 +185,7 @@ pub async fn source_list(
         (status = 200, description = "数据源数据", body = AjaxResult<SourceDataVo>),
         (status = 400, description = "白名单外数据源或 range 不合法"),
         (status = 401, description = "未授权"),
+        (status = 429, description = "看板取数繁忙，请稍后重试"),
     ),
     tag = "tool-report-board"
 )]
@@ -194,6 +195,14 @@ pub async fn source_data(
     Path(source_key): Path<String>,
     Query(params): Query<SourceDataParams>,
 ) -> Result<AjaxResult<SourceDataVo>, AppError> {
+    // b140：看板每张卡片一次取数 = 一条窗口聚合/全表统计，而一次页面刷新会按白名单
+    // 数据源**扇出**（前端 `Promise.all`）。同一类聚合在报表预览侧早就进了
+    // `report:snapshot`，看板侧一个桶都没进 ⇒ 两个严格度（AGENTS ㉘）。
+    // permits 的下限由 `resource_gate` 的编译期不变式钳住（不得低于一屏扇出），
+    // 所以这道闸不会把首屏判成超载。取闸排在解析 range 与取数之前。
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::BoardSourceData,
+    )?;
     let days = crate::service::sys_report_board_service::parse_range_days(&params.range)?;
     let vo = state
         .report_board_service

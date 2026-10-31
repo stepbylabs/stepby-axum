@@ -87,10 +87,14 @@ pub enum HeavyEntry {
     BatchGenCode,
     /// 待重试消息批量重投（出站事实 + 写库）
     MsgOutbound,
+    /// 备份文件下载（GB 级快照流式读盘，b140 扩员）
+    BackupDownload,
+    /// 看板数据源取数（单页按白名单数据源**扇出**，b140 扩员）
+    BoardSourceData,
 }
 
 /// 成员数（数组长度与 `ALL` 共用；新增变体必须同时改这里，否则类型检查会失败）。
-const ENTRY_COUNT: usize = 13;
+const ENTRY_COUNT: usize = 15;
 
 /// 闸满后给客户端的退避提示（秒）。取 30 的理由：这一族单次耗时在 10 秒～数分钟，
 /// 30 秒既不会让人立刻重试打在同一次运行上，也不至于长到像"服务坏了"。
@@ -115,6 +119,8 @@ impl HeavyEntry {
         HeavyEntry::CacheMaintenance,
         HeavyEntry::BatchGenCode,
         HeavyEntry::MsgOutbound,
+        HeavyEntry::BackupDownload,
+        HeavyEntry::BoardSourceData,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -132,6 +138,8 @@ impl HeavyEntry {
             HeavyEntry::CacheMaintenance => "cache:maintenance",
             HeavyEntry::BatchGenCode => "gen:batch-code",
             HeavyEntry::MsgOutbound => "msg:outbound",
+            HeavyEntry::BackupDownload => "backup:download",
+            HeavyEntry::BoardSourceData => "report:board-source",
         }
     }
 
@@ -171,6 +179,18 @@ impl HeavyEntry {
             HeavyEntry::BatchGenCode => 1,
             // 批量出站重投：不可重放事实，但入口是人类触发 ⇒ 只允许一路
             HeavyEntry::MsgOutbound => 1,
+            // 备份文件下载：与 `operlog:archive-download` 同一成本级（GB 级快照流式读盘），
+            // 差别只在不压缩。取 2 的判据是"一个浏览器一次只下一个文件"——正常用户
+            // 摸不到上限，而脚本化连点会撞闸（下载是人类可重来的动作 ⇒ 取拒绝，A.2）。
+            HeavyEntry::BackupDownload => 2,
+            // 看板取数的下限**不是拍出来的**：一个看板页面刷新时按白名单数据源扇出
+            // （`Promise.all`，见 `views/tool/reportBoard/index.vue`），源数 = `SOURCES.len()`。
+            // 取任何 < 源数 的值都会让首屏必然部分 429 —— 那不是背压，是闸把页面自己的
+            // 正常扇出判成超载（与 `export:excel=8` 那条"不得制造时序性假失败"同一约束）。
+            // 取 8 = 本族上限（见 `heavy_entry_table_is_self_consistent` 的 1..=8 带）：
+            // 够一屏扇出再加两条重试余量；两路看板同时刷新会有请求被拒，而卡片取数是人类
+            // 可重来的动作 ⇒ 取拒绝（A.2），失败态由 b109 的"保留旧图 + 重试"通道承接。
+            HeavyEntry::BoardSourceData => 8,
         }
     }
 
@@ -189,26 +209,21 @@ impl HeavyEntry {
             HeavyEntry::CacheMaintenance => 10,
             HeavyEntry::BatchGenCode => 11,
             HeavyEntry::MsgOutbound => 12,
+            HeavyEntry::BackupDownload => 13,
+            HeavyEntry::BoardSourceData => 14,
         }
     }
 
     /// 本入口的闸（首次调用建闸，之后复用同一 `Arc`）。
+    ///
+    /// **长度由 `ENTRY_COUNT` 给**，不再手写逐项字面量：原先 13 项逐行罗列，
+    /// 扩员时要同时改 `ALL`/`index`/`SLOTS`/`ENTRY_COUNT` 四处，少改一处就是
+    /// `index()` 越界 panic（运行时）或长度不匹配（编译时）——而 `SLOTS` 那一处
+    /// 恰好是编译期能查出来、但**报错信息指不到"忘了加第 14 个闸"**的那种。
+    /// 用 repeat 表达式后，`ENTRY_COUNT` 是唯一的长度事实源（AGENTS 单一事实源）。
     fn gate(self) -> Arc<Semaphore> {
-        static SLOTS: [OnceLock<Arc<Semaphore>>; ENTRY_COUNT] = [
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-            const { OnceLock::new() },
-        ];
+        static SLOTS: [OnceLock<Arc<Semaphore>>; ENTRY_COUNT] =
+            [const { OnceLock::new() }; ENTRY_COUNT];
         let slot = &SLOTS[self.index()];
         slot.get_or_init(|| Arc::new(Semaphore::const_new(self.permits())))
             .clone()
@@ -220,6 +235,18 @@ impl HeavyEntry {
         self.gate().available_permits()
     }
 }
+
+/// 结构不变式（编译期）：**看板取数闸不得低于一屏的扇出数**。
+///
+/// `views/tool/reportBoard/index.vue` 刷新时按白名单数据源 `Promise.all` 扇出，源数由
+/// `SOURCES` 给。取任何小于它的值都会让**页面自己的正常首屏**部分 429——那是把合法
+/// 负载判成超载，与 `export:excel=8`（取 1~2 会让并行集成测试互相 429）同一约束。
+/// 关系写在代码里而不是只在注释里声明（AGENTS B.6 的编译期钳法）：将来有人往 `SOURCES`
+/// 加第 13 个源，构建当场失败，而不是等某个用户的看板少画一张图。
+const _: () = assert!(
+    HeavyEntry::BoardSourceData.permits()
+        >= crate::service::sys_report_board_service::SOURCES.len()
+);
 
 /// 取闸：拿到即返回 permit（**随请求生命周期持有**，返回即释放）。
 ///
@@ -263,36 +290,12 @@ fn precheck_verdict(available: usize) -> bool {
 ///
 /// 为什么不用 `Mutex<HashMap>`：入口集合是**编译期封闭**的，运行期不可能出现新键 ⇒
 /// 定长数组既免去锁，也让"每个入口都有计数器"这件事由类型保证而不是靠代码路径。
-static ADMITTED: [AtomicU64; ENTRY_COUNT] = [
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-];
-static REJECTED: [AtomicU64; ENTRY_COUNT] = [
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-    const { AtomicU64::new(0) },
-];
+///
+/// 长度同样取 `ENTRY_COUNT`（与 [`HeavyEntry::gate`] 的 `SLOTS` 同一条理由）：三张表逐行
+/// 罗列时，扩员要同步改 4 处字面量，漏一处的表现是 `index()` 越界 panic 在**第一次
+/// 真实取闸**那一刻，而不是在编译期。
+static ADMITTED: [AtomicU64; ENTRY_COUNT] = [const { AtomicU64::new(0) }; ENTRY_COUNT];
+static REJECTED: [AtomicU64; ENTRY_COUNT] = [const { AtomicU64::new(0) }; ENTRY_COUNT];
 
 /// 记一次闸口决策，返回**自增前**的读数（测试据此判"确实前进了"而不去比绝对值——
 /// 绝对值在并行用例里由别人决定，`fetch_add` 的返回值是这条通道唯一的事实量）。
@@ -405,7 +408,7 @@ mod tests {
             "成员表必须与枚举一一对应"
         );
         assert_eq!(
-            ENTRY_COUNT, 13,
+            ENTRY_COUNT, 15,
             "成员数变了 ⇒ 槽位/计数表/接线反查都要同步扩"
         );
         for (i, entry) in HeavyEntry::ALL.iter().copied().enumerate() {
@@ -658,6 +661,15 @@ mod tests {
                 "config_service.refresh_cache(",
             ),
             (
+                // b140：字典侧的同类入口此前**没有**接闸（只有参数侧接了），而它扫的是
+                // `dict:*` 全键空间且每次字典增删改都会触发——同一个语义两条链路一份背压、
+                // 一份没有，就是"看运气"。补为同一把闸的第二个接线点。
+                "cache:maintenance",
+                "HeavyEntry::CacheMaintenance",
+                "src/handler/sys_dict_handler.rs",
+                "refresh_all_dict_cache(",
+            ),
+            (
                 "cache:maintenance",
                 "HeavyEntry::CacheMaintenance",
                 "src/handler/monitor_cache_handler.rs",
@@ -674,6 +686,24 @@ mod tests {
                 "HeavyEntry::MsgOutbound",
                 "src/handler/sys_msg_handler.rs",
                 ".retry_pending(batch,",
+            ),
+            (
+                // b140：整库快照下载此前**完全不受预算约束**（`BackupExport` 管的是"生成
+                // 数据包"那一段，不是把已存在的 GB 级文件读出流）。与 `operlog:archive-download`
+                // 同一成本级，只是不压缩 ⇒ 独立一桶、同为 2 permits。
+                "backup:download",
+                "HeavyEntry::BackupDownload",
+                "src/handler/sys_backup_handler.rs",
+                "open_backup_file(",
+            ),
+            (
+                // b140：看板卡片取数与报表预览是同一类聚合（同一批 service 统计口径），
+                // 预览走了 `report:snapshot`、看板取数一个桶都没进 ⇒ 同一语义两个严格度。
+                // 扇出下限由上方编译期不变式钳住（permits ≥ SOURCES.len()）。
+                "report:board-source",
+                "HeavyEntry::BoardSourceData",
+                "src/handler/sys_report_board_handler.rs",
+                ".resolve_source(&source_key,",
             ),
         ];
         // 正向 + 反向：ALL 与登记表必须逐成员对上（缺哪一侧都由这一条点名）。
@@ -718,8 +748,11 @@ mod tests {
         }
         assert_eq!(
             files.len(),
-            18,
-            "反查必须覆盖全部 18 个接线文件（少了就是有人把接线挪出了视野）"
+            20,
+            "反查必须覆盖全部 20 个接线文件（少了就是有人把接线挪出了视野）。\
+             这是**等式**而不是下限：b140 起接线文件数由 18 增至 20（新增看板取数与备份下载\
+             两条链），等式逼着每一个改接线的人重新数一遍——`>=` 会让\"删掉一行\"静默通过，\
+             而那正是本断言唯一防的事"
         );
     }
 

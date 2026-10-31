@@ -2253,12 +2253,16 @@ impl SysTenantService {
             legacy_user_ids.sort_unstable();
             legacy_user_ids.dedup();
             let rows = SysUser::find()
+                .select_only()
+                .column(UserColumn::UserId)
+                .column(UserColumn::TenantId)
                 .filter(UserColumn::UserId.is_in(legacy_user_ids))
+                .into_tuple::<(i64, i64)>()
                 .all(self.db())
                 .await
                 .unwrap_or_default();
-            for u in rows {
-                legacy_tids.insert(u.user_id, u.tenant_id);
+            for (uid, tid) in rows {
+                legacy_tids.insert(uid, tid);
             }
         }
         let now_secs = chrono::Utc::now().timestamp();

@@ -94,6 +94,7 @@ pub async fn dict_type_optionselect(
     path = "/system/dict/type/refreshCache",
     responses(
         (status = 200, description = "刷新成功", body = AjaxResult<serde_json::Value>),
+        (status = 429, description = "缓存维护入口繁忙"),
         (status = 500, description = "服务器错误"),
     ),
     tag = "system-dict"
@@ -101,6 +102,13 @@ pub async fn dict_type_optionselect(
 pub async fn dict_type_refresh_cache(
     State(state): State<Arc<AppState>>,
 ) -> Result<AjaxResult<()>, AppError> {
+    // b140：与参数侧 `refresh_cache` 同一条闸（`cache:maintenance`）。这条链同样是**无上限
+    // SCAN**（`refresh_all_dict_cache` 扫 `dict:*` 后整批 DEL），此前只有参数侧接了闸——
+    // 同一个语义的两个入口，一个有背压、一个没有，等于"看运气"。字典刷新比参数刷新更频繁
+    // （每次字典增删改都会触发），并发触发时两路全键空间扫描会互相拖慢并放大 Redis 抖动。
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::CacheMaintenance,
+    )?;
     state.dict_service.refresh_all_dict_cache().await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.refresh")))
 }

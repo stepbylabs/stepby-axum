@@ -22,6 +22,16 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use crate::common::error::ServiceError;
 use crate::config::Settings;
 
+/// 批量投递的并发度。
+///
+/// 取 5 的理由：常见 SMTP 服务端对单连接账号的并发会话数限制在 2~10，5 是不触发
+/// 421/450 "too many connections" 的安全中位。
+///
+/// **这个数是别处的算式输入**，不是纯实现细节：`sys_notice_service::NOTICE_EMAIL_BUDGET`
+/// 的"最坏情况能容多少封"由 `预算 / MAIL_SEND_TIMEOUT × 本并发度` 得出，并由该模块的
+/// 编译期断言钳住。写回字面量 `5` 会让那条容量式与真实并发脱钩（AGENTS 单一事实源）。
+pub const MAIL_BATCH_CONCURRENCY: usize = 5;
+
 /// HTML 邮件 Content-Type 常量
 ///
 /// `ContentType::parse` 在常量字符串上理论恒成功，但解析失败会 panic。
@@ -274,8 +284,9 @@ impl MailerService {
 
         let total = to_emails.len() as u32;
 
-        // 并行发送：buffer_unordered(5) 限制并发度为 5，避免 SMTP 服务器并发连接限制
-        // 每个 future 持有独立的 MailerService 克隆（transporter 内部为 Arc，克隆廉价）
+        // 并行发送：buffer_unordered 限制并发度（见 `MAIL_BATCH_CONCURRENCY`），避免 SMTP
+        // 服务器并发连接限制。每个 future 持有独立的 MailerService 克隆（transporter 内部
+        // 为 Arc，克隆廉价）
         let results: Vec<(String, Result<(), ServiceError>)> =
             stream::iter(to_emails.iter().cloned())
                 .map(|email| {
@@ -287,7 +298,7 @@ impl MailerService {
                         (email, res)
                     }
                 })
-                .buffer_unordered(5)
+                .buffer_unordered(MAIL_BATCH_CONCURRENCY)
                 .collect()
                 .await;
 
@@ -297,7 +308,11 @@ impl MailerService {
             match res {
                 Ok(()) => success += 1,
                 Err(e) => {
-                    tracing::warn!("批量发送邮件失败 to={}: {}", email, e);
+                    // 收件地址不进日志：本文件单封路径早就定了这个口径（"只打错误文本，
+                    // 不打收件地址——邮箱属 PII，沿用既有脱敏口径"），批量路径此前漏了一层，
+                    // 一封公告群发失败会在日志里留下整串个人邮箱。失败清单仍然**返回给调用方**
+                    // （`failed_emails`），可见性没有丢，只是不再经由日志这条旁路外泄。
+                    tracing::warn!("批量发送邮件失败: {}", e);
                     failed_emails.push(email);
                 }
             }

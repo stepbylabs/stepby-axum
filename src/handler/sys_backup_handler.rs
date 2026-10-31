@@ -326,6 +326,7 @@ async fn clear_business_caches(state: &Arc<AppState>) {
         (status = 200, description = "下载成功", content_type = "application/octet-stream"),
         (status = 400, description = "备份状态不允许下载"),
         (status = 404, description = "备份记录或文件不存在"),
+        (status = 429, description = "备份下载繁忙，请稍后重试"),
     ),
     tag = "system-backup"
 )]
@@ -336,6 +337,12 @@ pub async fn download(
     headers: HeaderMap,
     Path(backup_id): Path<i64>,
 ) -> Result<Response, AppError> {
+    // b140：GB 级快照流式读盘此前没有任何并发上限（`backup:export` 那把闸管的是**生成**
+    // 数据包，不是把已存在的文件读出流）。下载是人类可重来的动作 ⇒ 取拒绝（A.2）。
+    // 取闸排在打开文件之前：闸满时不得先把句柄与体积校验的成本付掉。
+    let _gate = crate::common::resource_gate::try_enter(
+        crate::common::resource_gate::HeavyEntry::BackupDownload,
+    )?;
     // 流式下载：备份是整库快照（可达 GB 级），把整个文件读进内存再回包会让
     // 每次下载的 RSS 峰值等于文件大小；这里只持有文件句柄，按 64KB 分块出流。
     let opened = state

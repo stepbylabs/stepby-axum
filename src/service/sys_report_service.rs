@@ -20,8 +20,8 @@ use chrono::NaiveDateTime;
 use futures::future::FutureExt;
 use garde::Validate;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1009,20 +1009,24 @@ impl SysReportService {
         if let Some(tid) = tenant {
             query = query.filter(UserColumn::TenantId.eq(tid));
         }
-        let recent_users = query
+        // §一.16 列投影：这条链只要"每一天新增几个"，`password` 摘要出现在这里没有任何
+        // 功能理由。NULL 分支显式下推 SQL（原实现是 `if let Some(ct)` 的内存过滤 ⇒ 语义等价）。
+        let recent_create_times: Vec<NaiveDateTime> = query
+            .filter(UserColumn::CreateTime.is_not_null())
+            .select_only()
+            .column(UserColumn::CreateTime)
             .order_by_asc(UserColumn::CreateTime)
+            .into_tuple::<NaiveDateTime>()
             .all(db)
             .await
             .unwrap_or_default();
 
         let mut trend_map: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
-        for u in &recent_users {
-            if let Some(ct) = u.create_time {
-                *trend_map
-                    .entry(ct.format("%Y-%m-%d").to_string())
-                    .or_insert(0) += 1;
-            }
+        for ct in &recent_create_times {
+            *trend_map
+                .entry(ct.format("%Y-%m-%d").to_string())
+                .or_insert(0) += 1;
         }
         let mut trend = Vec::new();
         for i in 0..USER_TREND_DAYS {

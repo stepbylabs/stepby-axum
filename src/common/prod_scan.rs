@@ -146,6 +146,89 @@ pub fn rel_paths(dir_rel: &str) -> Vec<String> {
         .collect()
 }
 
+/// 生产路由注册面的文件清单：`src/router/**` **加上**任何模块自带的 `router.rs`。
+///
+/// 立案（b137，原判据留在 `initialize/rate_limit.rs` 的 tests 里）：`/system/audit-change/*`
+/// 注册在 `src/audit/router.rs`，只扫 `src/router/` 会让"档位 ⊆ 路由表"那把锁**凭空变红**；
+/// 而按名字枚举补一个目录，又会把下一次迁移留给下一个人踩（前言 ⑬ 的同族）。
+///
+/// **b140 把它从限流锁的私有测试件提升为单源采集器**：限流档位与请求超时档位是同一类判据
+/// （登记表必须与 router 逐字对账），两份实现必漂——漂的形态是"一把锁先红、另一把静默放行"。
+pub fn router_files() -> Vec<PathBuf> {
+    let root = repo_root();
+    let mut files = walk_rs(&root.join("src"));
+    files.retain(|p| {
+        let rel = p
+            .strip_prefix(&root)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace('\\', "/");
+        rel.starts_with("src/router/") || rel.ends_with("/router.rs") || rel == "src/router.rs"
+    });
+    assert!(
+        !files.is_empty(),
+        "prod_scan: 没读到任何 router 源文件 ⇒ 路由采集面失效（不是\"路由为空\"）"
+    );
+    assert!(
+        files.iter().any(|p| p.ends_with("audit/router.rs")),
+        "采集面必须覆盖模块自带路由器 src/audit/router.rs（否则审计路由的档位/外带判据都看不见它）"
+    );
+    files
+}
+
+/// 读取全部路由注册文本（剔除注释行，避免注释里的示例路径骗过形状锁）。
+pub fn router_registry() -> String {
+    let mut files = router_files();
+    files.sort();
+    let mut out = String::new();
+    for f in files {
+        let src = std::fs::read_to_string(&f).unwrap_or_default();
+        for line in src.lines() {
+            if !line.trim_start().starts_with("//") {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// 把路由注册文本拆成 `(路径, 注册表达式)`。
+///
+/// 只做圆括号配对——`.route(...)` 的实参里没有字符串内的圆括号（路径模板只有 `{}`），
+/// 因此不需要完整 tokenizer；配对失败（输入坏了）返回已解析部分，由调用方的体量下限兜住。
+pub fn route_blocks(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(pos) = rest.find(".route(") {
+        let tail = &rest[pos + ".route(".len()..];
+        let Some(q1) = tail.find('"') else { break };
+        let Some(q2_rel) = tail[q1 + 1..].find('"') else {
+            break;
+        };
+        let path = tail[q1 + 1..q1 + 1 + q2_rel].to_string();
+        let mut depth = 1isize;
+        let mut end = None;
+        for (i, ch) in tail.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else { break };
+        out.push((path, tail[..end].to_string()));
+        rest = &tail[end..];
+    }
+    out
+}
+
 /// 把源码文本按 [`Scan`] 口径归一成行集（纯函数，便于控制组直接喂合成源码）。
 pub fn normalize(text: &str, cfg: &Scan<'_>) -> Vec<String> {
     let body = if cfg.strip_test_code {
@@ -445,6 +528,41 @@ mod selftests {
         assert_eq!(
             sites, 2,
             "主路径 + 回退路径两处构造点必须都数得到（登记表按重数对账，少一处就是一条假腐化）"
+        );
+
+        // b140：`src/service/sys_job_service.rs` 是既有限制（下一条用例钉住的那一条）在**本仓
+        // 的真实命中点**——第一个 `#[cfg(test)] mod tests` 曾写在第 987 行，而其后的
+        // `JobStatsDailyVo` / `JobLogStatsVo` / `aggregate_job_stats` / `rate_percent`（1061-1241）
+        // 是货真价实的生产代码，却对**所有**用默认口径的形状锁不可见：
+        // `no_panic_guard`（生产码禁 unwrap）、`fail_closed_guard`（裸 spawn）、
+        // `api_contract_guard`（DTO 线上名）都扫不到那 180 行。今天恰好那一段没有缺陷，
+        // 是运气不是判据成立——在下一个人往那一段里写 `unwrap()` 之前，先把这一面照亮。
+        // 修法是**把测试块挪到文件末尾**（而不是改刀口口径：改口径会同时动十余把锁的输入，
+        // 属另立批次影响面，见下一条用例）。
+        let job = prod_file(
+            "src/service/sys_job_service.rs",
+            &Scan {
+                comments: Comments::Drop,
+                ..Default::default()
+            },
+        );
+        let job_view = job.lines.join("\n");
+        for signature in [
+            "pub struct JobStatsDailyVo",
+            "pub struct JobFailureTopVo",
+            "pub struct JobLogStatsVo",
+            "fn aggregate_job_stats(",
+            "fn rate_percent(",
+        ] {
+            assert!(
+                job_view.contains(signature),
+                "sys_job_service.rs 的 `{signature}` 必须落在生产视图内——它一旦消失，\
+                 说明有人把 `#[cfg(test)]` 块挪回到了这些声明之前，那 180 行立刻对所有形状锁失明"
+            );
+        }
+        assert!(
+            !job_view.contains("mod job_stats_tests"),
+            "测试模块本体不得进生产视图（刀口仍然有效，只是位置挪对了）"
         );
     }
 

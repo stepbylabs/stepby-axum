@@ -10,8 +10,8 @@
 use futures::future::FutureExt;
 use garde::Validate;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, QueryFilter,
-    Set, Statement, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, Set, Statement, TransactionTrait,
 };
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
@@ -757,15 +757,11 @@ impl SysDeptService {
                 let before_snapshot = before_snapshot.clone();
                 let operator = operator.to_string();
                 async move {
-                    // 1. 事务内重新检查子部门
+                    // 1. 事务内重新检查子部门（存在性下推 SQL：只数行，不搬行）
                     let child_select = SysDept::find()
                         .filter(DeptColumn::ParentId.eq(dept_id))
                         .filter(DeptColumn::DelFlag.eq("0"));
-                    let child_count = dept_repo
-                        .base()
-                        .find_many_conn(txn, child_select)
-                        .await?
-                        .len() as u64;
+                    let child_count = dept_repo.base().count_conn(txn, child_select).await?;
                     if child_count > 0 {
                         return Err(sea_orm::DbErr::Custom(crate::tr!(
                             "error.dept.has_children"
@@ -775,24 +771,20 @@ impl SysDeptService {
                     // 2. 事务内重新检查角色关联
                     let role_count = SysRoleDept::find()
                         .filter(RoleDeptColumn::DeptId.eq(dept_id))
-                        .all(txn)
-                        .await?
-                        .len() as u64;
+                        .count(txn)
+                        .await?;
                     if role_count > 0 {
                         return Err(sea_orm::DbErr::Custom(crate::tr!(
                             "error.dept.assigned_to_role"
                         )));
                     }
 
-                    // 3. 事务内重新检查用户关联
+                    // 3. 事务内重新检查用户关联（§一.16：`sys_user` 的关联判定只需要"有没有"，
+                    // 原先经 `find_many_conn` 把整行——含 `password` 摘要——读进内存再数长度）
                     let user_select = SysUser::find()
                         .filter(UserColumn::DeptId.eq(dept_id))
                         .filter(UserColumn::DelFlag.eq("0"));
-                    let user_count = user_repo
-                        .base()
-                        .find_many_conn(txn, user_select)
-                        .await?
-                        .len() as u64;
+                    let user_count = user_repo.base().count_conn(txn, user_select).await?;
                     if user_count > 0 {
                         return Err(sea_orm::DbErr::Custom(crate::tr!("error.dept.has_users")));
                     }

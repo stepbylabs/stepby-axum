@@ -472,86 +472,11 @@ pub async fn ensure_sensitive_rate_limit_tiers(db: &DatabaseConnection) -> anyho
 mod tests {
     use super::*;
 
-    /// 生产路由注册面：`src/router/**` **加上**任何模块自带的 `router.rs`。
-    ///
-    /// b137 之前只扫 `src/router/`，而 `/system/audit-change/*` 注册在 `src/audit/router.rs`：
-    /// 给这条路由配限流档位时，「档位 ⊆ 路由表」那把锁会**凭空变红**（表里没有这行文本），
-    /// 而按名字枚举补一个目录又会把下一次迁移留给下一个人踩（b82 ⑬ 的同族）。
-    /// 采集面因此由事实派生：目录内 `.rs` + 任意 `router.rs`。
-    fn router_files() -> Vec<std::path::PathBuf> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut files = crate::common::prod_scan::walk_rs(&root.join("src"));
-        files.retain(|p| {
-            let rel = p
-                .strip_prefix(root)
-                .unwrap_or(p)
-                .to_string_lossy()
-                .replace('\\', "/");
-            rel.starts_with("src/router/") || rel.ends_with("/router.rs") || rel == "src/router.rs"
-        });
-        assert!(
-            files.iter().any(|p| p.ends_with("audit/router.rs")),
-            "采集面必须覆盖模块自带路由器 src/audit/router.rs（否则审计路由的档位/外带判据都看不见它）"
-        );
-        files
-    }
-
-    /// 读取全部路由注册文本（剔除注释行，避免注释里的示例路径骗过形状锁）。
-    fn router_registry() -> String {
-        let mut files = router_files();
-        assert!(
-            !files.is_empty(),
-            "未读到任何 router 源文件（本锁的扫描面失效，而非路由为空）"
-        );
-        files.sort();
-        let mut out = String::new();
-        for f in files {
-            let src = std::fs::read_to_string(&f).unwrap_or_default();
-            for line in src.lines() {
-                if !line.trim_start().starts_with("//") {
-                    out.push_str(line);
-                    out.push('\n');
-                }
-            }
-        }
-        out
-    }
-
-    /// 把路由注册文本拆成 `(路径, 注册表达式)`。
-    ///
-    /// 只做圆括号配对——`.route(...)` 的实参里没有字符串内的圆括号（路径模板只有 `{}`），
-    /// 因此不需要完整 tokenizer；配对失败（输入坏了）返回已解析部分，由调用方的体量下限兜住。
-    fn route_blocks(text: &str) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        let mut rest = text;
-        while let Some(pos) = rest.find(".route(") {
-            let tail = &rest[pos + ".route(".len()..];
-            let Some(q1) = tail.find('"') else { break };
-            let Some(q2_rel) = tail[q1 + 1..].find('"') else {
-                break;
-            };
-            let path = tail[q1 + 1..q1 + 1 + q2_rel].to_string();
-            let mut depth = 1isize;
-            let mut end = None;
-            for (i, ch) in tail.char_indices() {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = Some(i);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let Some(end) = end else { break };
-            out.push((path, tail[..end].to_string()));
-            rest = &tail[end..];
-        }
-        out
-    }
+    // 路由注册面的采集（文件清单 / 去注释文本 / `.route(...)` 拆分）**不在这里**——
+    // 它与 `middleware::request_timeout` 的档位形状锁是同一类判据（登记表必须与 router
+    // 逐字对账），两份实现必漂（AGENTS ㉘"同一句纪律写几遍就有几个严格度"）。
+    // b140 起统一走 `common::prod_scan` 的单源采集器。
+    use crate::common::prod_scan::{route_blocks, router_registry};
 
     /// GET 数据外带路径形态：`…/download`、`…/download/{id}`、`…/export`、
     /// `…/archive/{id}`。列表/详情（`/archive-anchors`、`/…/{id}`）不算外带。

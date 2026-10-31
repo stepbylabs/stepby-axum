@@ -138,6 +138,13 @@ pub const CONFIG_KEY_MAXMIND_ACCOUNT_ID: &str = "ip_location.maxmind_account_id"
 pub const CONFIG_KEY_MAXMIND_LICENSE_KEY: &str = "ip_location.maxmind_license_key";
 pub const CONFIG_KEY_AUTO_UPDATE_ENABLED: &str = "ip_location.auto_update_enabled";
 
+/// 镜像下载（mmdb / GeoLite 归档）的客户端超时（秒）。
+///
+/// 与 [`crate::service::sys_backup_service::BACKUP_TIMEOUT_SECS`] 同属"服务端同步长任务"，
+/// 因此同样是 `middleware::request_timeout` 长任务档的派生输入；两处下载共用这一个常量，
+/// 不再各写一个 `300`（同一件事写两遍就有两个严格度，AGENTS ㉘）。
+pub const IP_DOWNLOAD_TIMEOUT_SECS: u64 = 300;
+
 /// P3TERX 镜像下载 URL（直接提供 .mmdb 文件，无需解压）
 const P3TERX_URL: &str =
     "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb";
@@ -436,7 +443,7 @@ impl IpLocationService {
         tracing::info!("从 P3TERX 镜像下载 mmdb 文件: {}", P3TERX_URL);
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(std::time::Duration::from_secs(IP_DOWNLOAD_TIMEOUT_SECS))
             .user_agent("stepby-backend/0.1")
             .build()?;
 
@@ -484,7 +491,7 @@ impl IpLocationService {
         );
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(std::time::Duration::from_secs(IP_DOWNLOAD_TIMEOUT_SECS))
             .user_agent("stepby-backend/0.1")
             .build()?;
 

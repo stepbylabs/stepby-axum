@@ -154,6 +154,20 @@ where
         select.all(conn).await
     }
 
+    /// 执行自定义查询只取行数（使用指定连接）
+    ///
+    /// 与 `find_many_conn(..).len()` 的差别不是风格而是**失败面**：后者把整行（含凭据列）
+    /// 读进内存只为回答"有没有"，行数上千时既慢又把 `password` 摘要搬进进程。
+    /// 批八十八立"存在性判定下推 SQL"这一族时缺的就是这条通道——补在这里，
+    /// 所有 `_conn` 系列同一个宿主，服务层不必各自手写 `.count()`。
+    pub async fn count_conn<C: ConnectionTrait>(
+        &self,
+        conn: &C,
+        select: Select<E>,
+    ) -> Result<u64, DbErr> {
+        select.count(conn).await
+    }
+
     /// 插入一条记录（使用指定连接，返回完整 Model）
     ///
     /// DB-22：MySQL 不支持 RETURNING 子句，按 backend 分支处理：
