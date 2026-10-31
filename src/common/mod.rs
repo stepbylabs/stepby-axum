@@ -19,6 +19,8 @@ pub mod excel;
 pub mod extract;
 pub mod features;
 pub mod flow_graph;
+// 请求路径已持有锁的 RAII 守卫（显式释放优先，Drop 兜底；handler future 可被丢弃）
+pub mod held_lock;
 pub mod http_download;
 pub mod http_status;
 pub mod i18n;

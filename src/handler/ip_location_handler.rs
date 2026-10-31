@@ -275,13 +275,14 @@ pub async fn update_now(
             "error.ip_location.update_in_progress"
         )));
     };
+    // b141：RAII 持有——handler future 被丢弃时写在 await 之后的 release 永不执行，
+    // 锁会挂满 TTL（恢复锁同款修复，见 common::held_lock 模块文档）。
+    let mut update_lock = crate::common::held_lock::HeldLock::new(state.store.clone(), lock_handle);
 
     let result = state.ip_location_service.update_now(force_source).await;
 
-    // 释放锁（CAS：仅当 fencing token 匹配时删除；best-effort）
-    if let Err(e) = state.store.lock_release(&lock_handle).await {
-        tracing::warn!(error = %e, "IP 库更新锁释放失败（TTL 到期后其他任务可抢占）");
-    }
+    // 正常路径显式释放（CAS：仅当 fencing token 匹配时删除；best-effort）
+    update_lock.release().await;
 
     Ok(AjaxResult::success(result?))
 }

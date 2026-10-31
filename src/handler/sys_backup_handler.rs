@@ -260,16 +260,18 @@ pub async fn restore(
             "error.backup.restore_in_progress"
         )));
     };
+    // b141：锁交给 RAII 守卫——handler future 被丢弃（客户端断开 / 外层超时 / 进程收尾）时，
+    // 写在业务 await 之后的 release 一次都不会执行，锁会挂满 TTL。
+    let mut restore_lock =
+        crate::common::held_lock::HeldLock::new(state.store.clone(), lock_handle);
 
     let result = state
         .backup_service
         .restore_backup(backup_id, operator.username())
         .await;
 
-    // 释放锁（CAS：仅当 fencing token 匹配时删除，避免误删其他恢复任务的锁；best-effort）
-    if let Err(e) = state.store.lock_release(&lock_handle).await {
-        tracing::warn!(error = %e, "恢复互斥锁释放失败（TTL 到期后其他任务可抢占）");
-    }
+    // 正常路径显式释放（CAS：仅当 fencing token 匹配时删除，避免误删其他恢复任务的锁；best-effort）
+    restore_lock.release().await;
     result?;
 
     // 恢复成功后清理业务缓存，避免缓存与恢复后的数据库数据不一致
