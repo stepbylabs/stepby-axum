@@ -107,6 +107,16 @@ const TASK_SORTABLE_COLUMNS: &[(&str, TaskColumn)] = &[
     ("update_time", TaskColumn::UpdateTime),
 ];
 
+/// 允许的任务类型白名单。
+///
+/// 为什么收成白名单（b148）：`task_type` 是前端筛选与标签映射的**唯一键**。开放任意字符串
+/// 的后果不是"更灵活"，而是"能入库但解释不了"——列表里既筛不出来（筛选项是有限集），
+/// 也说不清是什么任务。改造前实体注释写的是 `export/import/backup/other`，而真实取值是
+/// `operlog_export` 与 `replay`，**注释与代码完全对不上**，照着注释写新代码必然造出第三种写法。
+///
+/// 新增类型要同时改三处：本常量、前端 `task.form.taskType*` 的筛选项、实体注释。
+pub const TASK_TYPES: &[&str] = &["operlog_export", "replay", "other"];
+
 /// 任务进度 Service
 pub struct SysTaskService {
     task_repo: SysTaskRepository,
@@ -131,6 +141,15 @@ impl SysTaskService {
     ) -> Result<SysTaskModel, ServiceError> {
         // P1：参数校验（task_type/task_name 长度、total 范围）
         crate::common::i18n::validate(&dto)?;
+        // b148：类型必须是白名单里的一种，否则这条任务在任务中心既筛不出也解释不了
+        if !TASK_TYPES.contains(&dto.task_type.as_str()) {
+            return Err(ServiceError::bad_request(&format!(
+                "{}: {}（{}）",
+                crate::common::i18n::pick("不支持的任务类型", "Unsupported task type"),
+                dto.task_type,
+                TASK_TYPES.join(" / ")
+            )));
+        }
         let now = crate::common::datetime::now_naive();
         let am = SysTaskActiveModel {
             // 多租户 Phase 2：任务单据归属提交人/归属人租户
@@ -178,11 +197,26 @@ impl SysTaskService {
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
-        let total = total.unwrap_or(existing.total);
-        let progress = if total > 0 {
-            ((current as f64 / total as f64) * 100.0).min(100.0) as i32
+        let total = total.unwrap_or(existing.total).max(0);
+        // b148：完成数不得越界。上报 `current > total` 时界面会出现"120 / 100"，而进度又被
+        // 钳到 100——两个数互相矛盾，看的人分不清是"跑多了"还是"总量填错了"。负数同理：
+        // 进度条会反向。这里按总量收敛并留一条 WARN，让越界这件事**有痕迹**而不是被抹平。
+        let current = current.max(0);
+        let current = if total > 0 && current > total {
+            tracing::warn!(
+                task_id = task_id,
+                current = current,
+                total = total,
+                "任务进度上报超出总量：按总量收敛（调用方应修上报口径）"
+            );
+            total
         } else {
-            existing.progress
+            current
+        };
+        let progress = if total > 0 {
+            (((current as f64 / total as f64) * 100.0).round() as i32).clamp(0, 100)
+        } else {
+            existing.progress.clamp(0, 100)
         };
         let now = crate::common::datetime::now_naive();
 
@@ -420,6 +454,23 @@ impl SysTaskService {
                     "error.common.forbidden"
                 )));
             }
+        }
+        // b148：未结束的任务不得删除。删掉之后，后台执行者的下一次进度/终态回调会拿到 404
+        // （一次真实工作变成一条"任务不存在"的告警），而界面上它已经"处理完了"——既看不到
+        // 进度也看不到失败原因。等它落了终态再删，删掉的才是**事实**。
+        if let Some(open) = tasks
+            .iter()
+            .find(|t| matches!(t.status.as_str(), "pending" | "running"))
+        {
+            return Err(ServiceError::bad_request(&format!(
+                "{}: #{}（{}）",
+                crate::common::i18n::pick(
+                    "任务尚未结束，请等它结束再删除",
+                    "Task has not finished yet; delete it after it settles"
+                ),
+                open.task_id,
+                open.status
+            )));
         }
         self.task_repo.delete_by_ids(ids).await?;
         Ok(())

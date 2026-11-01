@@ -1,7 +1,12 @@
 //! sys_task 实体定义（任务进度中心表）
 //!
-//! task_type: "export"=导出, "import"=导入, "backup"=备份, "other"=其他
-//! status:    "pending"=等待, "running"=运行中, "success"=成功, "failed"=失败
+//! 取值以 [`crate::service::sys_task_service::TASK_TYPES`] 为准（b148 起**写入侧强校验**）：
+//! - task_type: `operlog_export`=操作日志导出 / `replay`=录制回放 / `other`=其他
+//! - status:    `pending`=等待 / `running`=运行中 / `success`=成功 / `failed`=失败
+//!
+//! 为什么不在这里再列一遍类型：这张表的旧注释写的是 export/import/backup/other，
+//! 与真实取值 operlog_export / replay **完全对不上**——注释漂了两年没人发现，因为
+//! 没有任何判据拿它和代码对账。单一事实源放在 service 常量里，由写入侧白名单钉住。
 
 use chrono::NaiveDateTime;
 use sea_orm::entity::prelude::*;

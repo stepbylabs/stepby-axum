@@ -108,7 +108,7 @@ async fn test_task_terminal_states_are_final() {
     let svc = SysTaskService::new(ctx.state.db.clone());
 
     let mk = |name: &str| TaskCreateDto {
-        task_type: "it_task_probe".to_string(),
+        task_type: "other".to_string(),
         task_name: name.to_string(),
         total: 10,
         operator_id: None,
@@ -192,4 +192,147 @@ async fn test_task_terminal_states_are_final() {
         .expect("对照组：正常链路仍能落终态");
     assert_eq!(settled.status, "success");
     assert_eq!(settled.current, 10);
+}
+
+/// b148：任务类型必须是白名单里的一种。
+///
+/// 判据取**错误本身**而不是"没崩"：开放字符串的失效形态不是崩溃，而是"入库成功但界面上
+/// 解释不了"——那是一种比报错更差的结局，因为它看起来成功了。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_task_type_must_be_in_whitelist() {
+    use crate::service::sys_task_service::{SysTaskService, TaskCreateDto, TASK_TYPES};
+
+    let ctx = TestContext::new().await;
+    let svc = SysTaskService::new(ctx.state.db.clone());
+
+    for bad in ["it_probe_type", "export", "", "REPLAY"] {
+        let dto = TaskCreateDto {
+            task_type: bad.to_string(),
+            task_name: format!("b148-bad-{bad}"),
+            total: 1,
+            operator_id: None,
+        };
+        let err = svc
+            .create_task(dto, "system", 0, &ctx.state)
+            .await
+            .expect_err("白名单外的类型必须拒绝");
+        assert_eq!(err.code, 400, "应是 400 而不是 500: {err:?}");
+        // 空串会先被 garde 的长度校验拦下（"长度不能少于 1"），那条信息同样准确；
+        // 只有"格式合法但不在白名单"的情形才需要把合法值列出来。
+        if !bad.is_empty() {
+            assert!(
+                err.message.contains("operlog_export"),
+                "错误信息必须列出合法值，否则调用方只能猜: {}",
+                err.message
+            );
+        }
+    }
+
+    // 正控：白名单里的每一条都必须能建成（否则"白名单"等于把功能一起关掉）
+    for good in TASK_TYPES {
+        let dto = TaskCreateDto {
+            task_type: (*good).to_string(),
+            task_name: format!("b148-ok-{good}"),
+            total: 1,
+            operator_id: None,
+        };
+        let created = svc
+            .create_task(dto, "system", 0, &ctx.state)
+            .await
+            .unwrap_or_else(|e| panic!("白名单类型 {good} 必须能创建: {e:?}"));
+        assert_eq!(created.task_type, *good);
+    }
+}
+
+/// b148：进度上报越界必须被收敛到 `[0, total]`，并让 `current` 与 `progress` 不再互相矛盾。
+///
+/// 改造前：`progress` 被 `min(100)` 夹住，而 `current` 原样入库 ⇒ 界面出现"120 / 100"且
+/// 进度条满格；负的 `current` 还会让进度条反向。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_task_progress_is_clamped_to_total() {
+    use crate::service::sys_task_service::{SysTaskService, TaskCreateDto};
+
+    let ctx = TestContext::new().await;
+    let svc = SysTaskService::new(ctx.state.db.clone());
+    let task = svc
+        .create_task(
+            TaskCreateDto {
+                task_type: "other".to_string(),
+                task_name: "b148-clamp".to_string(),
+                total: 10,
+                operator_id: None,
+            },
+            "system",
+            0,
+            &ctx.state,
+        )
+        .await
+        .expect("创建任务应成功");
+
+    let over = svc
+        .update_progress(task.task_id, 15, None, &ctx.state)
+        .await
+        .expect("越界上报不得报错（它是调用方的口径问题，不是本行的失败）");
+    assert_eq!(over.current, 10, "current 必须收敛到 total: {over:?}");
+    assert_eq!(over.progress, 100, "progress 必须满格且与 current 自洽: {over:?}");
+
+    let under = svc
+        .update_progress(task.task_id, -5, None, &ctx.state)
+        .await
+        .expect("负数上报同样不得报错");
+    assert_eq!(under.current, 0, "current 必须夹到 0: {under:?}");
+    assert_eq!(under.progress, 0, "progress 不得为负: {under:?}");
+}
+
+/// b148：未结束的任务不得删除。
+///
+/// 删掉之后，后台执行者的下一次进度/终态回调会拿到 404（一次真实工作变成"任务不存在"
+/// 告警），而界面上它已经"处理完了"——既看不到进度也看不到失败原因。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_open_task_cannot_be_deleted() {
+    use crate::service::sys_task_service::{SysTaskService, TaskCreateDto};
+
+    let ctx = TestContext::new().await;
+    let svc = SysTaskService::new(ctx.state.db.clone());
+    let task = svc
+        .create_task(
+            TaskCreateDto {
+                task_type: "other".to_string(),
+                task_name: "b148-open".to_string(),
+                total: 2,
+                operator_id: None,
+            },
+            "system",
+            0,
+            &ctx.state,
+        )
+        .await
+        .expect("创建任务应成功");
+
+    let err = svc
+        .delete_tasks(vec![task.task_id], 0)
+        .await
+        .expect_err("未结束的任务必须拒绝删除");
+    assert_eq!(err.code, 400, "应是 400: {err:?}");
+    assert!(
+        err.message.contains(&task.task_id.to_string()),
+        "错误信息必须点名是哪条任务: {}",
+        err.message
+    );
+    assert!(
+        svc.get_task_by_id(task.task_id, None).await.is_ok(),
+        "拒绝删除后该任务必须还在（不能先删后拒）"
+    );
+
+    // 对照组：落终态之后必须能删（否则"拒绝"就成了永久禁止）
+    svc.complete_task(task.task_id, Some("done".to_string()), &ctx.state)
+        .await
+        .expect("完成应成功");
+    svc.delete_tasks(vec![task.task_id], 0)
+        .await
+        .expect("已结束的任务必须可删");
+    assert!(
+        svc.get_task_by_id(task.task_id, None).await.is_err(),
+        "删除后应查不到"
+    );
 }

@@ -1034,12 +1034,32 @@ mod tests {
 
     #[test]
     fn json_script_round_trips_through_serde() {
-        let steps = vec![step(1, "POST", "/system/dept", Some("{}"))];
+        let mut with_meta = step(1, "POST", "/system/dept", Some("{}"));
+        with_meta.headers_json = Some(r#"{"accept":"application/json"}"#.to_string());
+        with_meta.extract_json = Some(r#"{"deptId":"data.deptId"}"#.to_string());
+        let steps = vec![with_meta];
         let script = build_script(ScriptFormat::Json, &recording(), &steps, "http://h:1");
         let parsed: serde_json::Value = serde_json::from_str(&script).expect("必须是合法 JSON");
         assert_eq!(parsed["steps"].as_array().map(|a| a.len()), Some(1));
         assert_eq!(parsed["baseUrl"], "http://h:1");
         assert_eq!(parsed["steps"][0]["path"], "/system/dept");
+        // b148：完整快照——导出件必须带 headers 与 extractJson，否则"导出→导入"后
+        // 变量链断掉（下一步引用的 {{deptId}} 没有抽取来源），而文件本身看起来是完整的。
+        assert_eq!(
+            parsed["steps"][0]["headers"]["accept"], "application/json",
+            "导出必须携带可回放头子集"
+        );
+        assert_eq!(
+            parsed["steps"][0]["extractJson"]["deptId"], "data.deptId",
+            "导出必须携带抽取规则（否则变量链在导入后断掉）"
+        );
+        // 反向：没有这两项的步骤不得凭空造出空对象（导入端要能区分「没有」与「空」）
+        let plain = vec![step(2, "GET", "/system/dept", None)];
+        let parsed_plain: serde_json::Value =
+            serde_json::from_str(&build_script(ScriptFormat::Json, &recording(), &plain, "http://h:1"))
+                .expect("合法 JSON");
+        assert!(parsed_plain["steps"][0]["headers"].is_null());
+        assert!(parsed_plain["steps"][0]["extractJson"].is_null());
     }
 
     // ---------- 选项夹取 ----------

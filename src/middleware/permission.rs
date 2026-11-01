@@ -936,10 +936,17 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     ("GET", "/tool/recording/list", "tool:recording:list"),
     ("GET", "/tool/recording/{recordingId}", "tool:recording:query"),
     ("POST", "/tool/recording", "tool:recording:add"),
+    // 导入 = 新增一条录制；它写的是"将来会被真执行"的内容，故沿用 add 而不是 edit
+    ("POST", "/tool/recording/import", "tool:recording:add"),
     ("PUT", "/tool/recording", "tool:recording:edit"),
     ("DELETE", "/tool/recording/{recordingId}", "tool:recording:remove"),
     ("POST", "/tool/recording/{recordingId}/steps", "tool:recording:edit"),
     ("DELETE", "/tool/recording/{recordingId}/steps", "tool:recording:edit"),
+    (
+        "PUT",
+        "/tool/recording/{recordingId}/steps/{stepId}",
+        "tool:recording:edit",
+    ),
     (
         "DELETE",
         "/tool/recording/{recordingId}/steps/{stepId}",
@@ -1927,6 +1934,22 @@ mod tests {
             ("GET", "/system/task/list"),
             ("GET", "/system/task/{taskId}"),
             ("DELETE", "/system/task/{taskId}"),
+            // op_recording_router（b148 补齐：b147 只登记了权限映射，没进这份清单 ⇒ 那把
+            // "受保护路由必须有权映射"的锁当时**看不到**这 10 条路，等于少锁了一层）
+            ("GET", "/tool/recording/list"),
+            ("GET", "/tool/recording/{recordingId}"),
+            ("POST", "/tool/recording"),
+            ("POST", "/tool/recording/import"),
+            ("PUT", "/tool/recording"),
+            ("DELETE", "/tool/recording/{recordingId}"),
+            ("POST", "/tool/recording/{recordingId}/steps"),
+            ("PUT", "/tool/recording/{recordingId}/steps/{stepId}"),
+            ("DELETE", "/tool/recording/{recordingId}/steps"),
+            ("DELETE", "/tool/recording/{recordingId}/steps/{stepId}"),
+            ("POST", "/tool/recording/{recordingId}/replay"),
+            ("POST", "/tool/recording/{recordingId}/export"),
+            ("GET", "/tool/recording/{recordingId}/runs"),
+            ("GET", "/tool/recording/{recordingId}/runs/{runId}"),
             // ip_location_router
             ("GET", "/system/ipLocation/status"),
             ("GET", "/system/ipLocation/config"),

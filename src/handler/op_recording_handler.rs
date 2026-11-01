@@ -4,9 +4,11 @@
 //! - GET    /tool/recording/list                     分页查询录制
 //! - GET    /tool/recording/{recordingId}            详情（抬头 + 步骤）
 //! - POST   /tool/recording                          新建录制
+//! - POST   /tool/recording/import                   导入 JSON 脚本（导出件的逆运算）
 //! - PUT    /tool/recording                          编辑（名称/说明/状态）
 //! - DELETE /tool/recording/{recordingIds}           批量删除（连带步骤与运行记录）
 //! - POST   /tool/recording/{recordingId}/steps      追加一步（API 方式写入）
+//! - PUT    /tool/recording/{recordingId}/steps/{stepId}   就地改一步（seq 不变）
 //! - DELETE /tool/recording/{recordingId}/steps/{stepId}  删一步并收敛序号
 //! - DELETE /tool/recording/{recordingId}/steps      清空步骤
 //! - POST   /tool/recording/{recordingId}/replay     启动回放（异步；dryRun=true 只预检）
@@ -29,8 +31,8 @@ use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::middleware::Operator;
 use crate::service::op_recording::{
-    RecordingCreateDto, RecordingDetailVo, RecordingQueryDto, RecordingUpdateDto, ScriptFormat,
-    StepWriteDto,
+    RecordingCreateDto, RecordingDetailVo, RecordingImportDto, RecordingQueryDto,
+    RecordingUpdateDto, ScriptFormat, StepWriteDto,
 };
 use crate::service::op_recording_replay::{ReplayOptions, ReplayStartVo, RunDetailVo};
 use crate::state::AppState;
@@ -123,6 +125,39 @@ pub async fn create(
     Ok(AjaxResult::success(model))
 }
 
+/// POST /tool/recording/import
+///
+/// 导入 = 导出的逆运算：把一份 JSON 快照变成一条可回放的本地录制。
+/// 与「新建 + 逐步追加」的区别只有一个：**整条事务**——要么这条录制连同全部步骤成立，
+/// 要么库里什么都不留（半条录制在界面上看起来是能用的，那是最坏的一种假象）。
+#[utoipa::path(
+    post,
+    path = "/tool/recording/import",
+    request_body = RecordingImportDto,
+    responses(
+        (status = 200, description = "导入成功（返回抬头 + 步骤）"),
+        (status = 400, description = "脚本内容不合法（点名第几步）"),
+    ),
+    tag = "tool-recording"
+)]
+pub async fn import_script(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    axum::Json(payload): axum::Json<RecordingImportDto>,
+) -> Result<AjaxResult<RecordingDetailVo>, AppError> {
+    let detail = state
+        .op_recording_service
+        .import_recording(
+            payload,
+            operator.tenant_id(),
+            Some(operator.user_id_i64()?),
+            operator.username(),
+            crate::common::datetime::now_naive(),
+        )
+        .await?;
+    Ok(AjaxResult::success(detail))
+}
+
 /// PUT /tool/recording
 #[utoipa::path(
     put,
@@ -195,6 +230,44 @@ pub async fn append_step(
         .append_step(
             recording_id,
             operator.tenant_id(),
+            crate::common::tenant::tenant_scope(operator.tenant_id()),
+            payload,
+            crate::common::datetime::now_naive(),
+        )
+        .await?;
+    Ok(AjaxResult::success(model))
+}
+
+/// PUT /tool/recording/{recordingId}/steps/{stepId}
+///
+/// 就地改一步：`seq` 不变（改期望状态码不是"挪动这一步"），`headers` 不参与编辑
+/// （它是采集产物，见仓储层同名方法文档）。
+#[utoipa::path(
+    put,
+    path = "/tool/recording/{recordingId}/steps/{stepId}",
+    params(
+        ("recordingId" = i64, Path, description = "录制 ID"),
+        ("stepId" = i64, Path, description = "步骤 ID")
+    ),
+    request_body = StepWriteDto,
+    responses(
+        (status = 200, description = "保存成功"),
+        (status = 400, description = "内容不合法 / 录制已归档"),
+        (status = 404, description = "录制或步骤不存在"),
+    ),
+    tag = "tool-recording"
+)]
+pub async fn update_step(
+    State(state): State<Arc<AppState>>,
+    operator: Operator,
+    Path((recording_id, step_id)): Path<(i64, i64)>,
+    axum::Json(payload): axum::Json<StepWriteDto>,
+) -> Result<AjaxResult<crate::entity::sys_op_recording_step::Model>, AppError> {
+    let model = state
+        .op_recording_service
+        .update_step(
+            recording_id,
+            step_id,
             crate::common::tenant::tenant_scope(operator.tenant_id()),
             payload,
             crate::common::datetime::now_naive(),

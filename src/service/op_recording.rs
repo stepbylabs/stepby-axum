@@ -212,6 +212,48 @@ pub struct RecordingDetailVo {
     pub steps: Vec<StepModel>,
 }
 
+/// 导入请求：**与 `/export?format=json` 的输出同一形状**（可直接把导出的文件喂回来）。
+///
+/// 导入端的字段全部可选：导出的 JSON 里 `name`/`description` 可能是 null，`headers` /
+/// `extractJson` 可能缺席（b147 的导出就没写这两个字段，历史导出件仍应能导入）。
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingImportDto {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<ImportStepDto>,
+}
+
+/// 导入的一步（字段名与导出 JSON 逐字对齐）。
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportStepDto {
+    #[serde(default)]
+    pub method: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub query_string: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    /// 允许回放的请求头子集（凭据类会在归一化时被白名单滤掉）
+    #[serde(default)]
+    pub headers: Option<BTreeMap<String, String>>,
+    /// 返回值抽取规则：导出件是 JSON 对象（`{"deptId":"data.deptId"}`），
+    /// 也接受字符串形态（手写脚本 / 老数据里常见），两种都在归一化时收敛成同一份文本。
+    #[serde(default)]
+    pub extract_json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub expect_status: Option<i32>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 /// 导出格式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptFormat {
@@ -612,6 +654,95 @@ pub fn parse_extract_rules(raw: &str) -> BTreeMap<String, String> {
     serde_json::from_str::<BTreeMap<String, String>>(raw).unwrap_or_default()
 }
 
+/// 单步写入的**归一化输入**：追加 / 就地改 / 导入三条路径共用同一份。
+///
+/// 为什么要有这一层：三条路径各写一遍校验，必然出现"界面上能存、导入存不进"或
+/// "导入存进了但回放时才报路径非法"这类分歧（AGENTS ㉘「同一件事只写一次」）。
+/// 差别只在**继承什么**：追加没有可继承的 `content_type`，就地改要继承原值（否则
+/// 把表单体的 `application/x-www-form-urlencoded` 静默改写成 JSON），导入则显式携带。
+pub struct StepInput<'a> {
+    pub method: &'a str,
+    pub path: &'a str,
+    pub query_string: Option<&'a str>,
+    pub body: Option<&'a str>,
+    pub content_type: Option<&'a str>,
+    pub headers: Option<&'a BTreeMap<String, String>>,
+    pub extract_json: Option<&'a str>,
+    pub expect_status: Option<i32>,
+    pub note: Option<&'a str>,
+}
+
+/// 归一化一步：校验 + 脱敏 + 截断，产出可入库的 [`StepSeed`]。
+pub fn normalize_step(input: StepInput<'_>) -> Result<StepSeed, ServiceError> {
+    let method = input.method.trim().to_ascii_uppercase();
+    if !matches!(
+        method.as_str(),
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+    ) {
+        return Err(ServiceError::bad_request(pick(
+            "不支持的 HTTP 方法",
+            "Unsupported HTTP method",
+        )));
+    }
+    validate_step_path(input.path).map_err(ServiceError::bad_request)?;
+
+    let query_string = input
+        .query_string
+        .map(|q| redact_query(q.trim_start_matches('?')))
+        .filter(|q| !q.is_empty())
+        .map(|q| truncate_bytes(&q, MAX_CAPTURED_QUERY_BYTES).0);
+    let body = input.body.filter(|b| !b.is_empty()).map(|b| {
+        let redacted = redact_json_like(b);
+        truncate_body(&redacted).0
+    });
+
+    // 期望状态码：None = 只要求 2xx/3xx；填了就必须是合法 HTTP 状态码区间。
+    // 不校验的后果是"期望 999"永远对不上，回放每一步都判失败却看不出原因。
+    if let Some(code) = input.expect_status
+        && !(100..=599).contains(&code)
+    {
+        return Err(ServiceError::bad_request(pick(
+            "期望状态码必须在 100~599 之间",
+            "Expected status code must be within 100..=599",
+        )));
+    }
+
+    let content_type = input
+        .content_type
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(|c| truncate_bytes(c, 200).0)
+        .or_else(|| body.as_ref().map(|_| "application/json".to_string()));
+
+    // 请求头走可回放白名单：凭据类（Authorization/Cookie/…）与临时头（Content-Length/…）
+    // 在采集侧本就不收，这里再过滤一次——导入的是**外部快照**，不能假定它守规矩。
+    let headers_json = input.headers.and_then(|h| {
+        let filtered = filter_headers(h.iter().map(|(k, v)| (k.clone(), v.clone())));
+        if filtered.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&filtered).ok()
+        }
+    });
+
+    let extract_json = match input.extract_json.filter(|e| !e.trim().is_empty()) {
+        Some(raw) => Some(normalize_extract_rules(raw)?),
+        None => None,
+    };
+
+    Ok(StepSeed {
+        method,
+        path: input.path.trim().to_string(),
+        query_string,
+        content_type,
+        body,
+        headers_json,
+        extract_json,
+        expect_status: input.expect_status,
+        note: input.note.map(|n| truncate_bytes(n.trim(), 200).0),
+    })
+}
+
 /// 生成可执行脚本。
 ///
 /// 三种格式共用一个**单一事实源**（同一份 `steps`），差别只在序列化外壳：
@@ -711,6 +842,14 @@ pub fn build_script(
                         "queryString": st.query_string,
                         "contentType": st.content_type,
                         "body": st.body,
+                        // 导出必须是**完整快照**：漏掉 headers / extractJson 时"导出→导入"
+                        // 会在变量链上断掉——第二步引用的 {{var}} 没有抽取来源，回放必失败，
+                        // 而文件本身看起来是完整的（b148 实测的缺口）。
+                        // 两者都以 JSON 对象导出（人可读），导入侧同时接受对象与字符串两种形态。
+                        "headers": st.headers_json.as_deref()
+                            .and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok()),
+                        "extractJson": st.extract_json.as_deref()
+                            .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok()),
                         "expectStatus": st.expect_status,
                         "note": st.note,
                     })
@@ -976,62 +1115,171 @@ impl OpRecordingService {
                 pick("该录制步骤数已达上限", "Recording reached the step limit")
             )));
         }
-        let method = dto.method.trim().to_ascii_uppercase();
-        if !matches!(
-            method.as_str(),
-            "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
-        ) {
+        let seed = normalize_step(StepInput {
+            method: &dto.method,
+            path: &dto.path,
+            query_string: dto.query_string.as_deref(),
+            body: dto.body.as_deref(),
+            content_type: None,
+            headers: None,
+            extract_json: dto.extract_json.as_deref(),
+            expect_status: dto.expect_status,
+            note: dto.note.as_deref(),
+        })?;
+        let (model, _seq) = self.repo.append_step(recording_id, tenant_id, seed, now).await?;
+        Ok(model)
+    }
+
+    /// 就地改一步（`seq` / `headers_json` 不变，理由见仓储层同名方法文档）。
+    ///
+    /// `content_type` 继承原值：界面能改的只有"方法/路径/查询串/请求体/抽取规则/期望码/备注"，
+    /// 表单体的 `x-www-form-urlencoded` 不能被一次编辑静默改写成 JSON。
+    pub async fn update_step(
+        &self,
+        recording_id: i64,
+        step_id: i64,
+        tenant_scope: Option<i64>,
+        dto: StepWriteDto,
+        now: NaiveDateTime,
+    ) -> Result<StepModel, ServiceError> {
+        let recording = self
+            .repo
+            .find_by_id(recording_id)
+            .await?
+            .filter(|r| tenant_scope.is_none_or(|t| r.tenant_id == t))
+            .ok_or_else(|| ServiceError::not_found(pick("录制不存在", "Recording not found")))?;
+        if recording.status == "archived" {
             return Err(ServiceError::bad_request(pick(
-                "不支持的 HTTP 方法",
-                "Unsupported HTTP method",
+                "已归档的录制不可修改步骤",
+                "Archived recordings cannot be edited",
             )));
         }
-        validate_step_path(&dto.path).map_err(ServiceError::bad_request)?;
-
-        let query_string = dto
-            .query_string
-            .map(|q| redact_query(q.trim_start_matches('?')))
-            .filter(|q| !q.is_empty())
-            .map(|q| truncate_bytes(&q, MAX_CAPTURED_QUERY_BYTES).0);
-        let (body, _truncated) = match dto.body.filter(|b| !b.is_empty()) {
-            Some(b) => {
-                let redacted = redact_json_like(&b);
-                let (cut, t) = truncate_body(&redacted);
-                (Some(cut), t)
-            }
-            None => (None, false),
-        };
-        let content_type = if body.is_some() {
-            Some("application/json".to_string())
-        } else {
-            None
-        };
-        // 抽取规则：必须是"变量名 → 点路径"的字符串映射。非法形态在写入侧就拒绝，
-        // 而不是留到回放时才发现"这一步永远抽不到值"。
-        let extract_json = match dto.extract_json.filter(|e| !e.trim().is_empty()) {
-            Some(raw) => Some(normalize_extract_rules(&raw)?),
-            None => None,
-        };
-        let (model, _seq) = self
+        let existing = self
             .repo
-            .append_step(
-                recording_id,
-                tenant_id,
-                StepSeed {
-                    method,
-                    path: dto.path.trim().to_string(),
-                    query_string,
-                    content_type,
-                    body,
-                    headers_json: None,
-                    extract_json,
-                    expect_status: dto.expect_status,
-                    note: dto.note.map(|n| truncate_bytes(&n, 200).0),
+            .find_step(step_id)
+            .await?
+            .filter(|s| s.recording_id == recording_id)
+            .filter(|s| tenant_scope.is_none_or(|t| s.tenant_id == t))
+            .ok_or_else(|| ServiceError::not_found(pick("步骤不存在", "Step not found")))?;
+
+        let seed = normalize_step(StepInput {
+            method: &dto.method,
+            path: &dto.path,
+            query_string: dto.query_string.as_deref(),
+            body: dto.body.as_deref(),
+            content_type: existing.content_type.as_deref(),
+            headers: None,
+            extract_json: dto.extract_json.as_deref(),
+            expect_status: dto.expect_status,
+            note: dto.note.as_deref(),
+        })?;
+        self.repo
+            .update_step_fields(recording_id, step_id, tenant_scope, &seed, now)
+            .await?
+            .ok_or_else(|| ServiceError::not_found(pick("步骤不存在", "Step not found")))
+    }
+
+    /// 导入：把一份**外部快照**（导出的 JSON）变成一条可回放的本地录制。
+    ///
+    /// 语义三条：
+    /// 1. 来源固定 `import`——它说明"这条录制不是在本机边干边录出来的"，排查时这一位很关键；
+    /// 2. 状态固定 `ready`：导入即被视为可回放（草稿态没有意义，因为步骤已经齐了）；
+    /// 3. **整条事务**（抬头 + 步骤要么全成、要么全不成），失败时点名是第几步。
+    ///
+    /// 与 `append_step` 共用 [`normalize_step`]：导入的每一步都和界面录入受同一套校验
+    /// （方法白名单 / 路径必须是站内相对路径 / 敏感字段脱敏 / 抽取规则形态 / 状态码区间）。
+    pub async fn import_recording(
+        &self,
+        dto: RecordingImportDto,
+        tenant_id: i64,
+        owner_id: Option<i64>,
+        owner_name: &str,
+        now: NaiveDateTime,
+    ) -> Result<RecordingDetailVo, ServiceError> {
+        if dto.steps.is_empty() {
+            return Err(ServiceError::bad_request(pick(
+                "导入内容里没有任何步骤",
+                "The imported script contains no steps",
+            )));
+        }
+        if dto.steps.len() > MAX_STEPS_PER_RECORDING as usize {
+            return Err(ServiceError::bad_request(&format!(
+                "{} ({MAX_STEPS_PER_RECORDING})",
+                pick("导入的步骤数超过上限", "Imported steps exceed the limit")
+            )));
+        }
+        let name = dto
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| pick("导入的录制", "imported recording"));
+        if name.chars().count() > 120 {
+            return Err(ServiceError::bad_request(pick(
+                "录制名称长度必须在 1~120 之间",
+                "Recording name length must be 1..=120",
+            )));
+        }
+
+        let mut seeds = Vec::with_capacity(dto.steps.len());
+        for (idx, st) in dto.steps.iter().enumerate() {
+            // 对象形态（导出件）与字符串形态（手写/旧数据）收敛成同一份 JSON 文本
+            let extract_raw = st.extract_json.as_ref().map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            });
+            let seed = normalize_step(StepInput {
+                method: &st.method,
+                path: &st.path,
+                query_string: st.query_string.as_deref(),
+                body: st.body.as_deref(),
+                content_type: st.content_type.as_deref(),
+                headers: st.headers.as_ref(),
+                extract_json: extract_raw.as_deref(),
+                expect_status: st.expect_status,
+                note: st.note.as_deref(),
+            })
+            .map_err(|e| {
+                ServiceError::bad_request(&format!(
+                    "{} #{}: {}",
+                    pick("这一步不合法", "invalid step"),
+                    idx + 1,
+                    e.message
+                ))
+            })?;
+            seeds.push(seed);
+        }
+
+        let (head, steps) = self
+            .repo
+            .insert_with_steps(
+                RecordingActiveModel {
+                    tenant_id: Set(tenant_id),
+                    name: Set(name.to_string()),
+                    description: Set(dto
+                        .description
+                        .map(|d| d.trim().to_string())
+                        .filter(|d| !d.is_empty())),
+                    source: Set("import".to_string()),
+                    status: Set("ready".to_string()),
+                    step_count: Set(seeds.len() as i32),
+                    last_run_status: Set(None),
+                    last_run_time: Set(None),
+                    owner_id: Set(owner_id),
+                    owner_name: Set(Some(owner_name.to_string())),
+                    create_time: Set(Some(now)),
+                    update_time: Set(Some(now)),
+                    ..Default::default()
                 },
+                tenant_id,
+                &seeds,
                 now,
             )
             .await?;
-        Ok(model)
+        Ok(RecordingDetailVo {
+            recording: head,
+            steps,
+        })
     }
 
     /// 中间件采集入口（内部调用，已由中间件完成权限与租户判定）。
@@ -1163,4 +1411,163 @@ pub async fn authorized_ids(
     tenant_scope: Option<i64>,
 ) -> Result<BTreeSet<i64>, ServiceError> {
     Ok(repo.existing_ids(ids, tenant_scope).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn input<'a>(method: &'a str, path: &'a str) -> StepInput<'a> {
+        StepInput {
+            method,
+            path,
+            query_string: None,
+            body: None,
+            content_type: None,
+            headers: None,
+            extract_json: None,
+            expect_status: None,
+            note: None,
+        }
+    }
+
+    /// 三条写入路径（追加 / 就地改 / 导入）共用同一份校验：方法白名单与站内相对路径。
+    #[test]
+    fn normalize_step_rejects_bad_method_and_path() {
+        assert!(
+            normalize_step(input("FETCH", "/a")).is_err(),
+            "非 HTTP 方法必须拒绝"
+        );
+        for bad_path in ["http://evil/x", "//evil/x", "relative", "/a/../b"] {
+            assert!(
+                normalize_step(input("POST", bad_path)).is_err(),
+                "路径 {bad_path} 必须拒绝（回放目标不得由录制内容决定）"
+            );
+        }
+    }
+
+    /// 期望状态码越界必须当场拒：否则「期望 999」永远对不上，回放每步都失败却看不出原因。
+    #[test]
+    fn normalize_step_bounds_expected_status() {
+        for code in [99, 600, -1] {
+            let r = normalize_step(StepInput {
+                expect_status: Some(code),
+                ..input("GET", "/a")
+            });
+            assert!(r.is_err(), "状态码 {code} 必须拒绝");
+        }
+        let ok = normalize_step(StepInput {
+            expect_status: Some(204),
+            ..input("GET", "/a")
+        })
+        .expect("204 合法");
+        assert_eq!(ok.expect_status, Some(204));
+    }
+
+    /// 请求头只留可回放子集：凭据类必须被滤掉（导入的是外部快照，不能假定它守规矩）。
+    #[test]
+    fn normalize_step_keeps_only_replayable_headers() {
+        let h = headers(&[
+            ("Authorization", "Bearer secret-token"),
+            ("Cookie", "sid=abc"),
+            ("Accept", "application/json"),
+            ("X-Request-Id", "trace-1"),
+            ("Content-Length", "42"),
+        ]);
+        let seed = normalize_step(StepInput {
+            headers: Some(&h),
+            ..input("GET", "/a")
+        })
+        .expect("应成功");
+        let json = seed.headers_json.expect("应有头");
+        assert!(json.contains("accept"), "Accept 必须保留：{json}");
+        assert!(json.contains("x-request-id"), "追踪号必须保留：{json}");
+        let lower = json.to_ascii_lowercase();
+        assert!(!lower.contains("authorization"), "凭据头不得入库：{json}");
+        assert!(!lower.contains("cookie"), "Cookie 不得入库：{json}");
+        assert!(!lower.contains("content-length"), "传输层重算的头不入库：{json}");
+    }
+
+    /// 就地改一步要**继承**原 content_type：表单体不能被一次编辑静默改写成 JSON。
+    #[test]
+    fn normalize_step_inherits_content_type_instead_of_guessing() {
+        let form = normalize_step(StepInput {
+            body: Some("a=1&b=2"),
+            content_type: Some("application/x-www-form-urlencoded"),
+            ..input("POST", "/a")
+        })
+        .expect("应成功");
+        assert_eq!(
+            form.content_type.as_deref(),
+            Some("application/x-www-form-urlencoded"),
+            "继承来的表单类型不得被改写成 JSON"
+        );
+        // 追加路径（没有可继承的值）才回落到 JSON 默认
+        let fresh = normalize_step(StepInput {
+            body: Some(r#"{"a":1}"#),
+            ..input("POST", "/a")
+        })
+        .expect("应成功");
+        assert_eq!(fresh.content_type.as_deref(), Some("application/json"));
+    }
+
+    /// 敏感字段脱敏 + 查询串只留键 + 备注截断：归一化是「入库前最后一次把关」。
+    #[test]
+    fn normalize_step_redacts_and_bounds_fields() {
+        let long_note = "n".repeat(300);
+        let seed = normalize_step(StepInput {
+            query_string: Some("?token=secret&page=1"),
+            body: Some(r#"{"password":"p@ss","name":"n"}"#),
+            extract_json: Some(r#"{"id":"data.id"}"#),
+            note: Some(&long_note),
+            ..input("POST", "/a")
+        })
+        .expect("应成功");
+        let q = seed.query_string.expect("应有查询串");
+        assert!(!q.contains("secret"), "查询串里的敏感值必须折叠：{q}");
+        assert!(q.contains("page=1"), "非敏感值保留：{q}");
+        let body = seed.body.expect("应有体");
+        assert!(!body.contains("p@ss"), "敏感字段值必须折叠：{body}");
+        assert!(body.contains("\"n\""), "非敏感字段照常保留：{body}");
+        assert_eq!(seed.extract_json.as_deref(), Some(r#"{"id":"data.id"}"#));
+        assert!(
+            seed.note.expect("应有备注").chars().count() <= 200,
+            "备注必须截断到 200 字符"
+        );
+    }
+
+    /// 导入 DTO 同时接受「对象形态」（导出件）与「字符串形态」（手写/旧数据）。
+    #[test]
+    fn import_dto_accepts_both_extract_shapes() {
+        let obj: RecordingImportDto = serde_json::from_str(
+            r#"{"steps":[{"method":"GET","path":"/a","extractJson":{"id":"data.id"}}]}"#,
+        )
+        .expect("对象形态应能解析");
+        assert_eq!(
+            obj.steps[0].extract_json.as_ref().map(|v| v.to_string()),
+            Some(r#"{"id":"data.id"}"#.to_string())
+        );
+        let text: RecordingImportDto = serde_json::from_str(
+            r#"{"steps":[{"method":"GET","path":"/a","extractJson":"{\"id\":\"data.id\"}"}]}"#,
+        )
+        .expect("字符串形态应能解析");
+        assert_eq!(
+            text.steps[0].extract_json.as_ref().map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            }),
+            Some(r#"{"id":"data.id"}"#.to_string())
+        );
+        // 缺席（b147 历史导出件）也必须能解析
+        let legacy: RecordingImportDto =
+            serde_json::from_str(r#"{"steps":[{"method":"GET","path":"/a"}]}"#).expect("历史件");
+        assert!(legacy.steps[0].extract_json.is_none());
+    }
 }
