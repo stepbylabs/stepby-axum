@@ -27,6 +27,8 @@ pub mod i18n;
 pub mod image;
 // 出站 HTTP 客户端构造的单一事实源（系统信任库缺失时回落内嵌根证书，构造期绝不 panic）
 pub mod outbound_client;
+// 出站错误响应体的读取/遮蔽/截断单一通道（"读不到"不得折成空串）
+pub mod outbound_error_body;
 pub mod page;
 // 权限键格式的单一事实源（菜单写面与种子契约测试共用）
 pub mod perm_format;

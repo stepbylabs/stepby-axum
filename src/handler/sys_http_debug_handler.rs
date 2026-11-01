@@ -35,6 +35,11 @@ pub async fn execute(
     operator: Operator,
     Json(dto): Json<HttpDebugDto>,
 ) -> Result<AjaxResult<HttpDebugVo>, AppError> {
+    // b145：入参校验必须排在**占闸之前**。`tool:http-debug` 只有 2 个许可，而一个 URL 写错的
+    // 请求根本不会出网——原先它也要先抢许可，闸满时拿到的是 429「该操作正在进行中」，
+    // 正确答案是 400「URL 格式非法」（把背压冒充参数错误，运维据此去查"调试器为什么这么忙"）。
+    // 校验只有 `precheck` 一份实现，`execute` 内部会再跑一次（纯计算，代价可忽略）。
+    crate::service::sys_http_debug_service::precheck(&dto)?;
     let _gate = crate::common::resource_gate::try_enter(
         crate::common::resource_gate::HeavyEntry::HttpDebugExecute,
     )?;
@@ -46,4 +51,37 @@ pub async fn execute(
     );
     let vo = state.http_debug_service.execute(dto).await?;
     Ok(AjaxResult::success(vo))
+}
+
+#[cfg(test)]
+mod tests {
+    /// b145：**入参校验必须排在占闸之前**。
+    ///
+    /// 立的案是实测的：`tool:http-debug` 只有 2 个许可，而一个 URL 写错的请求根本不会出网，
+    /// 原先也要先抢许可——闸满时它收到 429「该操作正在进行中（tool:http-debug）」，
+    /// 正确答案是 400「URL 格式非法」。同一轮集成测试里三个调试用例并发，非法输入那条
+    /// 就成了随机红（㉒：绿红由并行度决定）。
+    /// 这一条锁的是**顺序**，不是"有没有调用"：把 `precheck` 挪到闸后，形状完全合法但缺陷回来了。
+    #[test]
+    fn input_precheck_runs_before_the_gate() {
+        let cfg = crate::common::prod_scan::Scan::default();
+        let text =
+            crate::common::prod_scan::prod_file("src/handler/sys_http_debug_handler.rs", &cfg)
+                .text();
+        let pre = text
+            .find("precheck(&dto)")
+            .expect("生产视图里找不到入参校验调用点 ⇒ 校验被摘掉或改名，这条锁在看空处");
+        let gate = text
+            .find("resource_gate::try_enter(")
+            .expect("生产视图里找不到占闸点 ⇒ 闸被摘掉，出站重活失去背压");
+        assert!(
+            pre < gate,
+            "入参校验（偏移 {pre}）必须排在占闸（偏移 {gate}）之前，否则非法输入会被背压冒充"
+        );
+        // 对照：真实工作（execute）必须仍在闸之后——把闸整个摘掉同样能让上面那句成立
+        let work = text
+            .find("http_debug_service.execute(")
+            .expect("生产视图里找不到出站调用点");
+        assert!(gate < work, "占闸必须排在真实工作之前（b89 的接线纪律）");
+    }
 }

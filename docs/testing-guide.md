@@ -1072,7 +1072,7 @@ stepby-vue/tests/e2e/
 | 嵌入式模式登录失败 | 误用 `build:prod`（`VITE_APP_BASE_API='/prod-api'`）构建嵌入式前端 | 改用 `build:embedded`（`VITE_APP_BASE_API=''`）同源访问 |
 | M9 写操作权限测试 status=200 | 测试使用 `/dev-api/system/user`，嵌入式模式下 404 | 依次尝试 `''` 和 `'/dev-api'` 两个 base path |
 | Tour 遮罩拦截按钮点击 | `stepby-tour-mask` overlay 覆盖全屏 | 登录后设置 localStorage + Escape 键关闭 + 点击回退策略（该策略当时含 force 档，**b83 已整族禁用**，见"关键测试技术"） |
-| `/register` 探测产生 403 | 前端 `checkRegisterEnabled()` 单独探测 `/register` | 从 `/captchaImage` 响应读取 `registerEnabled` 字段 |
+| `/register` 探测产生 403 | 前端曾用一个探测壳单独探测 `/register`（该函数已随 b145 删除，全仓零调用点） | 从 `/captchaImage` 响应读取 `registerEnabled` 字段 |
 | 通知中心详情对话框不显示 | `handleViewDetail` 打开对话框后调用 `handleMarkRead`，后者检测到 `currentNotice.noticeId === row.noticeId` 后立即关闭对话框 | 拆分 `handleMarkRead`（不关闭对话框）和 `handleDialogMarkRead`（对话框内标记后关闭），消除竞态 |
 | `sanitizeHtml is not a function` | `notice-center/index.vue` 缺少 `sanitizeHtml` 导入 | 添加 `import { sanitizeHtml } from '@/utils/index'` |
 | 抽屉/对话框识别失败 | `waitForSelector('.el-drawer', {state:'visible'})` 选中隐藏的遗留元素 | 新增 `waitForVisibleDrawer` / `waitForVisibleDialog` 辅助函数，使用 `:visible` 伪类 |

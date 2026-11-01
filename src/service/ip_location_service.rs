@@ -83,6 +83,19 @@ pub struct IpLocationStatus {
     pub maxmind_account_id_configured: bool,
     /// MaxMind License Key 是否已配置
     pub maxmind_license_key_configured: bool,
+    /// 管理配置**是否真的读到了**（b145 · N-144-I）。
+    ///
+    /// `false` 时下面的更新源与四个凭据字段全是默认值，界面**不得**据此显示"未启用/未配置"——
+    /// 那是把"读不出来"显示成"没有这件事"（AGENTS ㊷）。
+    pub config_available: bool,
+    /// 库里是否有 Account ID 密文
+    pub account_id_present: bool,
+    /// Account ID 有密文但解不开
+    pub account_id_unreadable: bool,
+    /// 库里是否有 License Key 密文
+    pub license_key_present: bool,
+    /// License Key 有密文但解不开
+    pub license_key_unreadable: bool,
 }
 
 /// 更新结果
@@ -118,6 +131,49 @@ pub struct IpLocationConfig {
     pub maxmind_license_key: String,
     /// 是否启用自动更新
     pub auto_update_enabled: bool,
+    /// 库里**有** Account ID 密文。与"能不能解密出来"是两件事（b145 · N-144-I）。
+    pub account_id_present: bool,
+    /// Account ID 有密文但解不开：`CONFIG_ENC_KEY` 缺失 / 主密钥已轮换 / 密文损坏。
+    ///
+    /// 改造前它与"从来没配过"逐字段同形（解密失败折成空串 ⇒ 界面显示"未配置"），
+    /// 于是运维会去重填一个本来就在库里的凭据，而真故障（主密钥不匹配）没人看见。
+    /// 按字段分开而不是合并成一位：一个坏不代表两个坏，界面不得连带报另一个。
+    pub account_id_unreadable: bool,
+    /// 库里**有** License Key 密文
+    pub license_key_present: bool,
+    /// License Key 有密文但解不开
+    pub license_key_unreadable: bool,
+}
+
+impl IpLocationConfig {
+    /// 任一凭据"存了但解不开"。保存与更新两条闸都用它：写侧必须判这个事实，
+    /// 不得拿空串当"用户没配"（AGENTS b133 ①：读失败不得驱动一次写）。
+    pub fn any_credential_unreadable(&self) -> bool {
+        self.account_id_unreadable || self.license_key_unreadable
+    }
+}
+
+/// 凭据三态的判据（b145 · N-144-I）：`(可用明文, 库里有密文, 有密文但解不开)`。
+///
+/// 之所以单独成函数：`read_config` 需要 DB 与主密钥，三态本身却只由两个事实决定
+/// （密文在不在、解不解得开）。让它可被直接喂进单测，而不是"看起来对"。
+/// 方向取 fail-closed：解不开 ⇒ 可用明文为空（写路径必须自己判 unreadable 那一位，
+/// 不得拿空串当"用户没配"）。
+fn credential_outcome(
+    cipher: &str,
+    master_key: &str,
+    decrypt: fn(&str, &str) -> anyhow::Result<String>,
+) -> (String, bool, bool) {
+    if cipher.is_empty() {
+        return (String::new(), false, false);
+    }
+    if master_key.is_empty() {
+        return (String::new(), true, true);
+    }
+    match decrypt(cipher, master_key) {
+        Ok(value) => (value, true, false),
+        Err(_) => (String::new(), true, true),
+    }
 }
 
 /// 默认配置值
@@ -128,6 +184,10 @@ impl Default for IpLocationConfig {
             maxmind_account_id: String::new(),
             maxmind_license_key: String::new(),
             auto_update_enabled: false,
+            account_id_present: false,
+            account_id_unreadable: false,
+            license_key_present: false,
+            license_key_unreadable: false,
         }
     }
 }
@@ -193,23 +253,18 @@ impl IpLocationService {
             .read_config_value(CONFIG_KEY_AUTO_UPDATE_ENABLED)
             .await?;
 
-        let account_id = if account_id_enc.is_empty() {
-            String::new()
-        } else if master_key.is_empty() {
-            tracing::warn!("MaxMind Account ID 已存储但 CONFIG_ENC_KEY 未配置，无法解密");
-            String::new()
-        } else {
-            decrypt_config_value(&account_id_enc, master_key).unwrap_or_default()
-        };
-
-        let license_key = if license_key_enc.is_empty() {
-            String::new()
-        } else if master_key.is_empty() {
-            tracing::warn!("MaxMind License Key 已存储但 CONFIG_ENC_KEY 未配置，无法解密");
-            String::new()
-        } else {
-            decrypt_config_value(&license_key_enc, master_key).unwrap_or_default()
-        };
+        // b145（N-144-I）：凭据是**三态**，不是布尔。单独抽成纯函数是为了让三态可被证伪——
+        // 改造前"解不开"与"没存"都落成同一个空串，界面上便只剩"未配置"一种读法。
+        let (account_id, acc_present, acc_unreadable) =
+            credential_outcome(&account_id_enc, master_key, decrypt_config_value);
+        let (license_key, lic_present, lic_unreadable) =
+            credential_outcome(&license_key_enc, master_key, decrypt_config_value);
+        if acc_unreadable {
+            tracing::warn!("MaxMind Account ID 已存储但无法解密（主密钥缺失、已轮换或密文损坏）");
+        }
+        if lic_unreadable {
+            tracing::warn!("MaxMind License Key 已存储但无法解密（主密钥缺失、已轮换或密文损坏）");
+        }
 
         Ok(IpLocationConfig {
             update_source: if source.is_empty() {
@@ -220,15 +275,28 @@ impl IpLocationService {
             maxmind_account_id: account_id,
             maxmind_license_key: license_key,
             auto_update_enabled: auto_update == "true",
+            account_id_present: acc_present,
+            account_id_unreadable: acc_unreadable,
+            license_key_present: lic_present,
+            license_key_unreadable: lic_unreadable,
         })
     }
 
     /// 保存 IP 库管理配置到 sys_config 表（自动加密敏感字段）
+    ///
+    /// b145 把两个凭据参数改成 `Option<&str>`，因为改造前它们只有一个语义（空串＝清空），
+    /// 而调用方其实有两种完全不同的意图：
+    /// - `None` ⇒ **这一列不碰**。读侧（[`Self::read_config`]）交回的是**解密后的明文**，
+    ///   密文解不开时它是空串——于是旧写法里"字段留空就沿用原值"这句话，在密文损坏或主密钥
+    ///   轮换过的库里恰好会把唯一还有救的密文覆盖成空：**读失败驱动了一次写**（AGENTS b133 ①）。
+    ///   现在"不动"是一条真实的写路径，不再是一句假设。
+    /// - `Some("")` ⇒ 显式清空（管理端勾了"清空已存储凭据"）。
+    /// - `Some(v)`（非空）⇒ 加密后写入。
     pub async fn save_config(
         &self,
         source: &str,
-        account_id: &str,
-        license_key: &str,
+        account_id: Option<&str>,
+        license_key: Option<&str>,
         auto_update: bool,
     ) -> anyhow::Result<()> {
         let master_key = &self.config.config_enc_key;
@@ -237,39 +305,48 @@ impl IpLocationService {
         // 为明文落库 + WARN 的 fail-open）。运行期保存是管理员主动操作，给出明确
         // 错误比静默明文更安全（"关闭态即安全态"）；启动回填（v5-E6）只兜底存量
         // 明文行，不构成对继续产生明文的许可。
-        if master_key.is_empty() {
+        // b145 把这道闸收窄到"真的要写一份非空凭据"：`None`（不动）与 `Some("")`（清空）
+        // 都不产生明文，原先连"只翻自动更新开关"也要先配密钥，是把安全闸用成了挡路闸，
+        // 反而逼人绕过管理端去手改参数表。
+        let storing_credential = matches!(account_id, Some(v) if !v.is_empty())
+            || matches!(license_key, Some(v) if !v.is_empty());
+        if storing_credential && master_key.is_empty() {
             return Err(anyhow::anyhow!(
                 "CONFIG_ENC_KEY 未配置：拒绝以明文存储 MaxMind 凭据。请先在环境变量配置 ≥32 字符的 CONFIG_ENC_KEY 后重试"
             ));
         }
 
-        // 加密敏感字段（v3 信封，enc3:k1）
-        let account_id_stored = if account_id.is_empty() {
-            String::new()
-        } else {
-            encrypt_config_value(account_id, master_key)?
+        // 加密敏感字段（v3 信封，enc3:k1）；None 一律不写这一列
+        let account_id_stored = match account_id {
+            None => None,
+            Some("") => Some(String::new()),
+            Some(v) => Some(encrypt_config_value(v, master_key)?),
         };
 
-        let license_key_stored = if license_key.is_empty() {
-            String::new()
-        } else {
-            encrypt_config_value(license_key, master_key)?
+        let license_key_stored = match license_key {
+            None => None,
+            Some("") => Some(String::new()),
+            Some(v) => Some(encrypt_config_value(v, master_key)?),
         };
 
         self.upsert_config_value(CONFIG_KEY_UPDATE_SOURCE, source, "IP 库更新源")
             .await?;
-        self.upsert_config_value(
-            CONFIG_KEY_MAXMIND_ACCOUNT_ID,
-            &account_id_stored,
-            "MaxMind Account ID（加密）",
-        )
-        .await?;
-        self.upsert_config_value(
-            CONFIG_KEY_MAXMIND_LICENSE_KEY,
-            &license_key_stored,
-            "MaxMind License Key（加密）",
-        )
-        .await?;
+        if let Some(stored) = &account_id_stored {
+            self.upsert_config_value(
+                CONFIG_KEY_MAXMIND_ACCOUNT_ID,
+                stored,
+                "MaxMind Account ID（加密）",
+            )
+            .await?;
+        }
+        if let Some(stored) = &license_key_stored {
+            self.upsert_config_value(
+                CONFIG_KEY_MAXMIND_LICENSE_KEY,
+                stored,
+                "MaxMind License Key（加密）",
+            )
+            .await?;
+        }
         self.upsert_config_value(
             CONFIG_KEY_AUTO_UPDATE_ENABLED,
             if auto_update { "true" } else { "false" },
@@ -293,7 +370,20 @@ impl IpLocationService {
         let (_xdb_exists, xdb_size, xdb_modified) =
             tokio::task::spawn_blocking(move || file_info(&xdb_path_clone)).await?;
 
-        let cfg = self.read_config().await.unwrap_or_default();
+        // b145（N-144-I）：配置读不出来时**不得**折成默认档。
+        // 默认档与"确实没配"逐字段同形（auto_update_enabled=false、凭据全空），
+        // 于是运维在状态页看到的是"功能未启用"，而真故障（sys_config 读失败）一个字都看不见。
+        // 修法不是 `?` 上抛——那会把"文件信息"这一半**有用的**数据一起扔掉；
+        // 而是带着"配置未取到"这个可区分标记返回，由界面分开展示。
+        let (cfg, config_available) = match self.read_config().await {
+            Ok(cfg) => (cfg, true),
+            Err(e) => {
+                tracing::warn!(
+                    "IP 库状态：管理配置读取失败，本轮凭据/源字段按「未取到」呈现（原因：{e}）"
+                );
+                (IpLocationConfig::default(), false)
+            }
+        };
 
         Ok(IpLocationStatus {
             mmdb_loaded: self.ip_locator.is_loaded(),
@@ -309,6 +399,11 @@ impl IpLocationService {
             current_source: cfg.update_source,
             maxmind_account_id_configured: !cfg.maxmind_account_id.is_empty(),
             maxmind_license_key_configured: !cfg.maxmind_license_key.is_empty(),
+            config_available,
+            account_id_present: cfg.account_id_present,
+            account_id_unreadable: cfg.account_id_unreadable,
+            license_key_present: cfg.license_key_present,
+            license_key_unreadable: cfg.license_key_unreadable,
         })
     }
 
@@ -354,6 +449,11 @@ impl IpLocationService {
         let (new_mmdb_bytes, sha256_hex) = match source {
             UpdateSource::Maxmind => {
                 if cfg.maxmind_account_id.is_empty() || cfg.maxmind_license_key.is_empty() {
+                    // b145：先分"存了但解不开"与"根本没存"。旧写法一律报"需要配置凭据"，
+                    // 于是主密钥不匹配时运维会去重填一个库里本来就有的凭据（治标，且掩盖真故障）
+                    if cfg.any_credential_unreadable() {
+                        anyhow::bail!("{}", crate::tr!("error.ip_location.credentials_unreadable"));
+                    }
                     anyhow::bail!(
                         "MaxMind update source requires Account ID and License Key to be configured"
                     );
@@ -514,12 +614,12 @@ impl IpLocationService {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "MaxMind download failed, HTTP status: {}, response: {}",
-                status,
-                body
-            );
+            // b145：旧写法把"读不到"折成空串，且**完全不截断** —— MaxMind 的 4xx 页面可以
+            // 是一整页 HTML，整段进 anyhow 消息（既撑爆日志，又把"什么都没读到"写成"上游说了空话"）
+            let body =
+                crate::common::outbound_error_body::read_error_body(response, "ip_geo:maxmind")
+                    .await;
+            anyhow::bail!("MaxMind download failed, HTTP status: {status}, response: {body}");
         }
 
         let bytes = response
@@ -704,5 +804,89 @@ mod tests {
         assert!(!exists);
         assert_eq!(size, 0);
         assert_eq!(modified, 0);
+    }
+
+    /// b145（N-144-I）三态判据本体：没存 / 存了但主密钥缺失 / 存了但解密失败 / 存了且可用。
+    #[test]
+    fn credential_outcome_keeps_absent_and_unreadable_apart() {
+        fn ok(_: &str, _: &str) -> anyhow::Result<String> {
+            Ok("plain".to_string())
+        }
+        fn boom(_: &str, _: &str) -> anyhow::Result<String> {
+            anyhow::bail!("mac mismatch")
+        }
+
+        // ① 没存：present=false，且**不得**被读成"解不开"（否则界面提示重填一个不存在的凭据）
+        assert_eq!(
+            credential_outcome("", "K", ok),
+            (String::new(), false, false),
+            "空密文必须落『没配』这一态"
+        );
+        // ② 有密文但没有主密钥：present=true、unreadable=true
+        assert_eq!(
+            credential_outcome("ENC:xxxx", "", ok),
+            (String::new(), true, true),
+            "主密钥缺失时必须落『解不开』而不是『没配』"
+        );
+        // ③ 有密文、解密失败（轮换过密钥 / 密文损坏）
+        assert_eq!(
+            credential_outcome("ENC:xxxx", "K", boom),
+            (String::new(), true, true),
+            "解密失败必须落『解不开』"
+        );
+        // ④ 正常可用
+        assert_eq!(
+            credential_outcome("ENC:xxxx", "K", ok),
+            ("plain".to_string(), true, false),
+            "可用时 present=true、unreadable=false"
+        );
+        // 反向对照：②③ 与 ① 的 present 必须不同——这正是改造前被折叠掉的那一位
+        assert_ne!(
+            credential_outcome("ENC:xxxx", "", ok).1,
+            credential_outcome("", "K", ok).1,
+            "『有密文解不开』与『没存』被折成了同一件事 ⇒ 本批的案没修"
+        );
+    }
+
+    /// 状态响应必须真的把三个新字段带给前端（线上名逐字符钉住，防 camelCase 漂移）。
+    #[test]
+    fn status_serializes_the_three_new_online_names() {
+        let status = IpLocationStatus {
+            mmdb_loaded: true,
+            mmdb_path: "data/a.mmdb".into(),
+            mmdb_size: 1,
+            mmdb_modified: 2,
+            xdb_enabled: false,
+            xdb_loaded: false,
+            xdb_path: "data/a.xdb".into(),
+            xdb_size: 0,
+            xdb_modified: 0,
+            auto_update_cron: "0 3 * * *".into(),
+            current_source: "p3terx".into(),
+            maxmind_account_id_configured: false,
+            maxmind_license_key_configured: false,
+            config_available: false,
+            account_id_present: true,
+            account_id_unreadable: true,
+            license_key_present: true,
+            license_key_unreadable: false,
+        };
+        let v: serde_json::Value = serde_json::to_value(&status).unwrap();
+        assert_eq!(v["configAvailable"], serde_json::json!(false));
+        assert_eq!(v["accountIdPresent"], serde_json::json!(true));
+        assert_eq!(v["accountIdUnreadable"], serde_json::json!(true));
+        assert_eq!(v["licenseKeyPresent"], serde_json::json!(true));
+        assert_eq!(v["licenseKeyUnreadable"], serde_json::json!(false));
+        // 反向：一个坏不代表两个坏——界面必须能只把 Account ID 报成"解不开"
+        assert_ne!(v["accountIdUnreadable"], v["licenseKeyUnreadable"]);
+        // 旧字段一个都不能少（前端仍在读）
+        for key in [
+            "mmdbLoaded",
+            "currentSource",
+            "maxmindAccountIdConfigured",
+            "autoUpdateCron",
+        ] {
+            assert!(v.get(key).is_some(), "线上字段丢失：{key}");
+        }
     }
 }

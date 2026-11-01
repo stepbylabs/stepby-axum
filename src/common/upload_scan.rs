@@ -121,12 +121,25 @@ pub async fn scan_bytes(cfg: &UploadScanConfig, filename: &str, bytes: &[u8]) ->
     match req.send().await {
         Ok(resp) => {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             if !status.is_success() {
+                // b145：扫描端点非 2xx 的响应体里写的就是"为什么没扫成"（配额、凭据、引擎下线）。
+                // 改造前这里读了整段又丢弃，reason 只剩一句"扫描端点返回非 2xx（403）"。
+                let snippet =
+                    crate::common::outbound_error_body::read_error_body(resp, "upload_scan").await;
                 return ScanOutcome::Unavailable {
-                    reason: format!("扫描端点返回非 2xx（{status}）"),
+                    reason: format!("扫描端点返回非 2xx（{status}）：{snippet}"),
                 };
             }
+            // 成功路径要解析原文，必须拿未遮蔽的响应体；读失败上抛成可读的 reason，
+            // 而不是折成空串再让 parse_verdict 报"响应不是 JSON"（同一族的第二个断面）
+            let body = match resp.text().await {
+                Ok(body) => body,
+                Err(e) => {
+                    return ScanOutcome::Unavailable {
+                        reason: format!("扫描端点响应体读取失败（{e}）"),
+                    };
+                }
+            };
             match parse_verdict(&body) {
                 Ok(true) => {
                     outbound.succeeded();

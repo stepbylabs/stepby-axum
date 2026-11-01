@@ -224,8 +224,9 @@ impl S3Backend {
         if status.is_success() {
             return Ok(resp);
         }
-        let body = resp.text().await.unwrap_or_default();
-        let snippet: String = body.chars().take(200).collect();
+        // 走公共通道：S3 的 `<Code>AccessDenied</Code>` 是这条错误唯一的可诊断部分，
+        // 而"读不到"必须与"上游给了空体"分两句说（旧写法折成空串 ⇒ detail 为空）
+        let snippet = crate::common::outbound_error_body::read_error_body(resp, "storage:s3").await;
         tracing::error!("S3 返回错误状态 {}: {snippet}", status.as_u16());
         Err(AppError::internal(&crate::tr!(
             "error.storage.s3_status",
@@ -261,7 +262,7 @@ impl S3Backend {
             let parsed: ListBucketResult = quick_xml::de::from_str(&xml).map_err(|e| {
                 tracing::error!(
                     "解析 ListObjectsV2 响应失败: {e}，body: {}",
-                    xml.chars().take(150).collect::<String>()
+                    crate::common::outbound_error_body::mask_and_clip(&xml)
                 );
                 AppError::internal(&crate::tr!("error.storage.s3_list_failed"))
             })?;
@@ -461,16 +462,12 @@ impl StorageBackend for S3Backend {
         if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
             return Ok(());
         }
-        let body = resp.text().await.unwrap_or_default();
-        tracing::error!(
-            "S3 删除对象失败: {} {}",
-            status.as_u16(),
-            body.chars().take(200).collect::<String>()
-        );
+        let snippet = crate::common::outbound_error_body::read_error_body(resp, "storage:s3").await;
+        tracing::error!("S3 删除对象失败: {} {}", status.as_u16(), snippet);
         Err(AppError::internal(&crate::tr!(
             "error.storage.s3_status",
             status = status.as_u16(),
-            detail = body.chars().take(200).collect::<String>()
+            detail = snippet
         )))
     }
 

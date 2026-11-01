@@ -291,10 +291,12 @@ impl AiConfigService {
             outbound.succeeded();
             Ok(format!("连通正常（模型 {}，{ms}ms）", effective.model))
         } else {
-            let body = resp.text().await.unwrap_or_default();
+            // b145：上游给的理由（配额 / 无效凭据 / 地区限制）就在响应体里。
+            // 旧写法 `text().unwrap_or_default()` 把"读不到"折成空串，消息只剩 `status=403: `。
+            let body =
+                crate::common::outbound_error_body::read_error_body(resp, "ai:config_test").await;
             Err(ServiceError::bad_request(&format!(
-                "连通异常 status={status}: {}",
-                body.chars().take(120).collect::<String>()
+                "连通异常 status={status}: {body}"
             )))
         }
     }

@@ -407,6 +407,7 @@ error:
     source_invalid: 更新源必须为 maxmind 或 p3terx
     unknown_source_type: "未知的更新源类型: %{s}"
     maxmind_credentials_required: 切换到 maxmind 源需配置 Account ID 和 License Key
+    credentials_unreadable: MaxMind 凭据已存储但无法解密（主密钥缺失、已轮换或密文损坏），请在管理端重新保存凭据
     private_ip: 内网IP
     update_unavailable: IP 库更新服务暂不可用，请稍后再试
     update_in_progress: IP 库更新任务正在进行中，请稍后再试

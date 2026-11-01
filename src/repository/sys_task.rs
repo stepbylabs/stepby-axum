@@ -28,10 +28,6 @@ impl SysTaskRepository {
         }
     }
 
-    pub fn base(&self) -> &BaseRepository<SysTask> {
-        &self.base
-    }
-
     /// 未结束态（可以被推进/落终态的状态）。
     ///
     /// 取值集合与前端 `TaskProgress` 的"进行中"过滤**同源**（`pending` / `running`），
@@ -117,13 +113,14 @@ impl SysTaskRepository {
     // （b144 A5；HEAD 曾留一个"与其它 repository 的 CRUD 面一致"的裸 `update`，
     //  实测生产码与测试**零调用点**，于是按"删掉可能性的载体"而不是"钉住用法"处置）。
     //
-    // **仍未闭合的那一半（按实登记，见台账 b144 §7 N-144-G）**：本表的 `pub fn base()`
-    // （同样零调用点，实测全仓 156 处 `.base()` 无一指向 `SysTaskRepository`）把
-    // `BaseRepository<SysTask>` 交出去，而它自带整行 `update(model)`——所以"只剩两条受闸通道"
-    // 这句话目前靠的是"没人调用"，不是"结构上不可能"。谓词形状锁抓不到它：那条锁扫的是
-    // `update_many(`，而逃逸形状写的是 `.base().update(`。收口动作是删掉这个访问器
-    // （与 `update` 同一条处置），但它属后端生产码改动 ⇒ 嵌入产物与浏览器面必须重跑，
-    // 排到有前端改动同批的下一轮做，不为一个零调用点的访问器单独触发一轮重跑。
+    // b145 收掉 b144 §7 N-144-G 登记的另一半：`pub fn base()` 访问器**已删**。
+    // 它把 `BaseRepository<SysTask>` 整个交出去，而后者自带整行 `update(model)`——
+    // 于是"只剩两条受闸通道"这句话当时靠的是"没人调用"，不是"结构上不可能"；
+    // 谓词形状锁也抓不到这个逃逸形状（那条锁扫 `update_many(`，而它写的是 `.base().update(`）。
+    // 取证（HEAD 口径实测）：全仓 158 处 `.base()` 无一指向 `SysTaskRepository`，
+    // 该类型只在 `service/sys_task_service.rs` 被持有，而那个文件内零处 `.base()`。
+    // 现在字段 `base` 是私有的、无公有访问器 ⇒ 结构性不可能；由
+    // `sys_task_repository_exposes_no_raw_base_handle` 钉住"不得再长回来"。
 
     /// 进度推进（**仅当行仍处于未结束态**）——b144 A5。
     ///
@@ -371,6 +368,63 @@ mod tests {
         assert!(
             gated >= 2,
             "带谓词的更新只数到 {gated} 条（期望 ≥2 = 两条咽喉）：此时『0 违规』不代表任何东西"
+        );
+    }
+
+    /// 纯函数：定义侧是否把 `BaseRepository<…>` 整块交了出去。
+    ///
+    /// 只认「公有 + 返回裸 `&BaseRepository<`」这一个形状：私有字段与返回受闸视图的
+    /// 访问器都不算（否则会把别的仓储一起判红，或者一个类型注解就绕过去）。
+    fn hands_out_base_repository(text: &str) -> bool {
+        text.lines().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("pub fn") && t.contains("-> &BaseRepository<")
+        })
+    }
+
+    /// b145 收 b144 N-144-G：本表仓储**不得**再暴露 `base()` 访问器。
+    ///
+    /// 上一把锁判的是"批量更新必须带谓词"，但它扫的是 `update_many(`——把整行 `update`
+    /// 的载体交出去的那条路写的是 `.base().update(`，形状锁看不见它（b144 §7 原话：
+    /// "只剩两条受闸通道"当时靠的是**没人调用**，不是**结构上不可能**）。
+    /// 访问器已删，这条锁保证它不会被"为了跟别的仓储保持一致"再加回来。
+    #[test]
+    fn sys_task_repository_exposes_no_raw_base_handle() {
+        let scan = crate::common::prod_scan::Scan {
+            comments: crate::common::prod_scan::Comments::Drop,
+            ..Default::default()
+        };
+        // 采集面由"这份文件定义了本表仓储"派生，不按文件名写死（改名/拆分都要能跟上）
+        let owners: Vec<_> = crate::common::prod_scan::prod_files(&scan)
+            .into_iter()
+            .filter(|f| f.text().contains("pub struct SysTaskRepository"))
+            .collect();
+        assert!(
+            !owners.is_empty(),
+            "采集面自证失效：生产码里找不到定义 `SysTaskRepository` 的文件 ⇒ \
+             本锁一条都没判就绿了（改名或整段删除都要先让它红）"
+        );
+        for f in &owners {
+            assert!(
+                !hands_out_base_repository(&f.text()),
+                "{} 又把 `BaseRepository<SysTask>` 交了出去（公有 `-> &BaseRepository<` 访问器）：\
+                 整行 update 的载体回归，谓词锁的覆盖面重新变成『靠没人调用』",
+                f.rel
+            );
+        }
+        // 双向：缺陷形状必抓
+        assert!(
+            hands_out_base_repository(
+                "impl R {\n    pub fn base(&self) -> &BaseRepository<SysTask> { &self.base }\n}\n"
+            ),
+            "合成违规没被抓到 ⇒ 判据坏"
+        );
+        // 合规形状不得误报：私有字段、以及返回受闸视图（非裸句柄）的访问器
+        assert!(
+            !hands_out_base_repository(
+                "impl R {\n    base: BaseRepository<SysTask>,\n    pub fn db(&self) -> &DatabaseConnection { self.base.db() }\n}\n"
+            ),
+            "合规形状被误判 ⇒ 每轮必红，结局是被放宽"
         );
     }
 

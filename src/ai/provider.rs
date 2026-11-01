@@ -190,11 +190,22 @@ impl AiProvider for OpenAiCompatibleProvider {
             .await
             .context("LLM 请求发送失败")?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            // 不透传 provider 原始错误体（可能含密钥/内部信息），只给状态码
+            // b145：先分岔再读体。旧写法在错误路径上已经把整个响应体拉进内存再丢弃
+            // （provider 的 4xx 页面可以是大 HTML）。
+            // 对外仍只给状态码——provider 错误体可能回显密钥/内部信息，这是 C.9 的既有取舍；
+            // 但遮蔽后的摘要必须进服务端日志：运维不该只剩"HTTP 403"这一件事可看。
+            let snippet =
+                crate::common::outbound_error_body::read_error_body(resp, "ai:chat").await;
+            tracing::warn!("LLM 服务返回异常状态 {status}，响应体摘要：{snippet}");
             anyhow::bail!("LLM 服务返回异常状态: {status}");
         }
+        // 读失败必须上抛：旧写法折成空串后交给下一句的是"响应解析失败"，
+        // 把"上游断开"报成了"上游给了坏 JSON"（同一族的第二个断面）
+        let text = resp
+            .text()
+            .await
+            .context("LLM 响应体读取失败（上游可能已断开连接）")?;
         let parsed: ChatResponse = serde_json::from_str(&text).context("LLM 响应解析失败")?;
         let content = parsed
             .choices

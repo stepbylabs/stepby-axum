@@ -101,26 +101,23 @@ pub fn dingtalk_signed_url(webhook_url: &str, secret: &str, timestamp_ms: u64) -
 
 /// 解析机器人响应 errcode（0 = 成功）
 fn parse_errcode(body: &str) -> Result<(), String> {
-    let v: serde_json::Value = serde_json::from_str(body).map_err(|e| {
-        format!(
-            "机器人响应不是合法 JSON: {e}（前 120 字节: {}）",
-            body.chars().take(120).collect::<String>()
-        )
-    })?;
-    let code = v.get("errcode").and_then(|x| x.as_i64()).ok_or_else(|| {
-        format!(
-            "机器人响应缺少 errcode 字段（前 120 字节: {}）",
-            body.chars().take(120).collect::<String>()
-        )
-    })?;
+    // 摘要一律走公共通道（遮蔽 + 截断 + "读不到/空体"哨兵），不再各处 `chars().take(120)`
+    let clip = |b: &str| crate::common::outbound_error_body::mask_and_clip(b);
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("机器人响应不是合法 JSON: {e}（响应体摘要: {}）", clip(body)))?;
+    let code = v
+        .get("errcode")
+        .and_then(|x| x.as_i64())
+        .ok_or_else(|| format!("机器人响应缺少 errcode 字段（响应体摘要: {}）", clip(body)))?;
     if code == 0 {
         Ok(())
     } else {
+        // b145：errmsg 缺失时给显式哨兵。旧写法折成空串 ⇒ "机器人返回 errcode=93000: "，
+        // 与"机器人给了空 errmsg"两种事实同形，而依赖明明把原因写在 errcode 的语义里
         let errmsg = v
             .get("errmsg")
             .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or("（响应未给出 errmsg）");
         Err(format!("机器人返回 errcode={code}: {errmsg}"))
     }
 }
@@ -176,13 +173,15 @@ impl WeComRobotProvider {
             .await
             .map_err(|e| format!("企微机器人请求失败: {e}"))?;
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(format!(
-                "企微机器人 HTTP {status}（前 120 字节: {}）",
-                body.chars().take(120).collect::<String>()
-            ));
+            let snippet =
+                crate::common::outbound_error_body::read_error_body(resp, "im_robot:wecom").await;
+            return Err(format!("企微机器人 HTTP {status}: {snippet}"));
         }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("企微机器人响应体读取失败: {e}"))?;
         parse_errcode(&body)
     }
 }
@@ -237,13 +236,16 @@ impl DingTalkRobotProvider {
             .await
             .map_err(|e| format!("钉钉机器人请求失败: {e}"))?;
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(format!(
-                "钉钉机器人 HTTP {status}（前 120 字节: {}）",
-                body.chars().take(120).collect::<String>()
-            ));
+            let snippet =
+                crate::common::outbound_error_body::read_error_body(resp, "im_robot:dingtalk")
+                    .await;
+            return Err(format!("钉钉机器人 HTTP {status}: {snippet}"));
         }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("钉钉机器人响应体读取失败: {e}"))?;
         parse_errcode(&body)
     }
 }

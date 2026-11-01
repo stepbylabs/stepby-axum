@@ -63,11 +63,19 @@ pub struct SaveConfigDto {
 #[serde(rename_all = "camelCase")]
 pub struct ConfigVo {
     pub update_source: String,
-    /// Account ID 是否已配置（不返回明文）
+    /// Account ID 是否已配置且可用（不返回明文）
     pub maxmind_account_id_configured: bool,
-    /// License Key 是否已配置（不返回明文）
+    /// License Key 是否已配置且可用（不返回明文）
     pub maxmind_license_key_configured: bool,
     pub auto_update_enabled: bool,
+    /// 库里**有** Account ID 密文（b145 · N-144-I）
+    pub account_id_present: bool,
+    /// Account ID 有密文但解不开 ⇒ 界面必须说"无法解密，请重新保存"，而不是"未配置"
+    pub account_id_unreadable: bool,
+    /// 库里**有** License Key 密文
+    pub license_key_present: bool,
+    /// License Key 有密文但解不开
+    pub license_key_unreadable: bool,
 }
 
 impl From<IpLocationConfig> for ConfigVo {
@@ -77,6 +85,10 @@ impl From<IpLocationConfig> for ConfigVo {
             maxmind_account_id_configured: !cfg.maxmind_account_id.is_empty(),
             maxmind_license_key_configured: !cfg.maxmind_license_key.is_empty(),
             auto_update_enabled: cfg.auto_update_enabled,
+            account_id_present: cfg.account_id_present,
+            account_id_unreadable: cfg.account_id_unreadable,
+            license_key_present: cfg.license_key_present,
+            license_key_unreadable: cfg.license_key_unreadable,
         }
     }
 }
@@ -150,41 +162,37 @@ pub async fn save_config(
         )));
     }
 
-    // 读取现有配置，以决定是"保留原值"还是"覆盖"
+    // 读取现有配置，以决定"这一列不动"还是"覆盖/清空"
     let existing = state.ip_location_service.read_config().await?;
 
-    let (final_account_id, final_license_key) = if dto.clear_credentials {
-        (String::new(), String::new())
-    } else {
-        // 字段为空 → 保留原值；字段非空 → 用新值覆盖
-        let aid = if dto.maxmind_account_id.is_empty() {
-            existing.maxmind_account_id
-        } else {
-            dto.maxmind_account_id.clone()
-        };
-        let lkey = if dto.maxmind_license_key.is_empty() {
-            existing.maxmind_license_key
-        } else {
-            dto.maxmind_license_key.clone()
-        };
-        (aid, lkey)
-    };
+    // b145（N-144-I 的写侧断面）：**空字段 = 不碰那一列**，不是"用读回来的值再写一遍"。
+    // 改造前读侧交回的是解密后的明文，密文解不开时那是空串，于是"留空即沿用原值"这句话
+    // 兑现不了——一次与凭据无关的保存（只翻自动更新开关）会把唯一还能救的密文覆盖成空，
+    // 即"读失败驱动了一次写"（AGENTS b133 ①）。现在不碰就是不写这一列，结构上不可能丢；
+    // 因此也**不再需要**"解不开就不许保存"那道 400——它当时拦的正是本可以安全完成的无关保存。
+    let account_id = credential_write(&dto.maxmind_account_id, dto.clear_credentials);
+    let license_key = credential_write(&dto.maxmind_license_key, dto.clear_credentials);
 
-    // 切换到 maxmind 时必须有凭据
-    if source == "maxmind" && (final_account_id.is_empty() || final_license_key.is_empty()) {
-        return Err(AppError::bad_request(&crate::tr!(
-            "error.ip_location.maxmind_credentials_required"
-        )));
+    // 切到 maxmind 时"凭据到底可用吗"：写新值看新值，不写则看库里的存量。
+    // 存量分两种坏法——没存过（要"去填"）与存了但解不开（要"重填或清空"）——理由不同，
+    // 文案必须不同：照着"请填写凭据"去重填一个库里本来就有的凭据，是把人支使去重复做一件事。
+    if let Some(gap) = maxmind_credential_error(
+        &source,
+        account_id,
+        license_key,
+        CredentialFacts {
+            account_present: existing.account_id_present,
+            account_unreadable: existing.account_id_unreadable,
+            license_present: existing.license_key_present,
+            license_unreadable: existing.license_key_unreadable,
+        },
+    ) {
+        return Err(AppError::bad_request(&gap_message(gap)));
     }
 
     state
         .ip_location_service
-        .save_config(
-            &source,
-            &final_account_id,
-            &final_license_key,
-            dto.auto_update_enabled,
-        )
+        .save_config(&source, account_id, license_key, dto.auto_update_enabled)
         .await?;
 
     tracing::info!(
@@ -244,6 +252,13 @@ pub async fn update_now(
     if effective_source == "maxmind"
         && (cfg.maxmind_account_id.is_empty() || cfg.maxmind_license_key.is_empty())
     {
+        // b145：分"存了但解不开"与"根本没存"——前者要的是"重新保存凭据"，
+        // 后者要的是"去填凭据"，给同一条提示会让运维重复做一件已经做过的事
+        if cfg.any_credential_unreadable() {
+            return Err(AppError::bad_request(&crate::tr!(
+                "error.ip_location.credentials_unreadable"
+            )));
+        }
         return Err(AppError::bad_request(&crate::tr!(
             "error.ip_location.maxmind_credentials_required"
         )));
@@ -355,4 +370,212 @@ pub async fn reload_xdb(
 pub struct UpdateSourceQuery {
     #[serde(default)]
     pub source: Option<String>,
+}
+
+/// 管理端提交的凭据字段折算成"写入意图"。
+///
+/// 三档而不是布尔，因为调用方有三种不同意图（详见 `IpLocationService::save_config` 的同款注释）：
+/// 勾了清空 ⇒ `Some("")`（真的写空）；留空 ⇒ `None`（这一列一个字都不动）；填了 ⇒ `Some(新值)`。
+/// 改造前"留空"与"清空"在写侧是同一条路径（都写空串），于是"只改更新源"会顺手抹掉凭据。
+fn credential_write(incoming: &str, clear_credentials: bool) -> Option<&str> {
+    if clear_credentials {
+        return Some("");
+    }
+    (!incoming.is_empty()).then_some(incoming)
+}
+
+/// 库里凭据的既成事实（读侧交回的三态，不含明文）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CredentialFacts {
+    account_present: bool,
+    account_unreadable: bool,
+    license_present: bool,
+    license_unreadable: bool,
+}
+
+/// 切到 maxmind 时凭据不可用的两种坏法。
+///
+/// 必须是两个变体而不是"一条通用文案"：`NotStored` 要的是"去填"，`Unreadable` 要的是
+/// "重填或清空"——给同一条提示会让运维重复填一个库里本来就有的凭据（⑨：错误提示把人支使去
+/// 把事实签反）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialGap {
+    /// 这一列压根没有值
+    NotStored,
+    /// 有值但解不开（主密钥缺失/轮换过，或密文损坏）
+    Unreadable,
+}
+
+/// 两种坏法 → 两条文案。
+///
+/// 刻意做成函数而不是在调用点内联 `match`：判据要**调用它取返回值**才能判"两条理由是否真的
+/// 不同"，而扫本文件文本的 needle 对"两个分支被并成同一条"结构上不敏感——同一个键名在
+/// `update_now` 里也在用，文本永远命中（b145 盘上变异实测：并键后文本锁照常绿）。
+/// `tr!` 的键必须是字面量（编译期展开，变量形式会静默把键名当文案返回），所以两个分支各写一条。
+fn gap_message(gap: CredentialGap) -> String {
+    match gap {
+        CredentialGap::NotStored => crate::tr!("error.ip_location.maxmind_credentials_required"),
+        CredentialGap::Unreadable => crate::tr!("error.ip_location.credentials_unreadable"),
+    }
+}
+
+/// 目标源为 maxmind 时，凭据到底可不可用；不可用则给出是哪一种坏法。
+///
+/// 返回 `None` 表示可以保存。
+fn maxmind_credential_error(
+    source: &str,
+    account_id: Option<&str>,
+    license_key: Option<&str>,
+    facts: CredentialFacts,
+) -> Option<CredentialGap> {
+    if source != "maxmind" {
+        return None;
+    }
+    // `Some(v)`：本次就要写 v（空串意味着清空 ⇒ 不可用）；`None`：沿用库里那一列的存量。
+    let usable = |incoming: Option<&str>, present: bool, unreadable: bool| match incoming {
+        Some(v) => !v.is_empty(),
+        None => present && !unreadable,
+    };
+    let broken = |incoming: Option<&str>, present: bool, unreadable: bool| match incoming {
+        Some(_) => false,
+        None => present && unreadable,
+    };
+    let aid_ok = usable(account_id, facts.account_present, facts.account_unreadable);
+    let lic_ok = usable(license_key, facts.license_present, facts.license_unreadable);
+    if aid_ok && lic_ok {
+        return None;
+    }
+    Some(
+        if broken(account_id, facts.account_present, facts.account_unreadable)
+            || broken(license_key, facts.license_present, facts.license_unreadable)
+        {
+            CredentialGap::Unreadable
+        } else {
+            CredentialGap::NotStored
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_GOOD: CredentialFacts = CredentialFacts {
+        account_present: true,
+        account_unreadable: false,
+        license_present: true,
+        license_unreadable: false,
+    };
+    const NONE_STORED: CredentialFacts = CredentialFacts {
+        account_present: false,
+        account_unreadable: false,
+        license_present: false,
+        license_unreadable: false,
+    };
+
+    #[test]
+    fn blank_field_never_writes_the_column() {
+        // 三种意图各自一个形状：留空 ⇒ 不动、清空 ⇒ 写空、填了 ⇒ 覆盖
+        assert_eq!(credential_write("", false), None);
+        assert_eq!(credential_write("  ", false), Some("  "));
+        assert_eq!(credential_write("abc", false), Some("abc"));
+        assert_eq!(credential_write("", true), Some(""));
+        // 勾了清空时，即便表单里还留着值也必须以清空为准（否则前端漏清一个字段就变成"又写回去"）
+        assert_eq!(credential_write("abc", true), Some(""));
+    }
+
+    #[test]
+    fn maxmind_source_requires_usable_credentials_of_some_kind() {
+        // 库里两个都好 + 本次不写 ⇒ 放行（这正是"只翻自动更新开关"那一类保存）
+        assert_eq!(
+            maxmind_credential_error("maxmind", None, None, ALL_GOOD),
+            None
+        );
+        // 库里没存过 ⇒ "去填"
+        assert_eq!(
+            maxmind_credential_error("maxmind", None, None, NONE_STORED),
+            Some(CredentialGap::NotStored)
+        );
+        // 一个本次新填、一个存量可用 ⇒ 放行
+        assert_eq!(
+            maxmind_credential_error(
+                "maxmind",
+                Some("new-id"),
+                None,
+                CredentialFacts {
+                    account_present: false,
+                    account_unreadable: false,
+                    license_present: true,
+                    license_unreadable: false,
+                }
+            ),
+            None
+        );
+        // 非 maxmind 一律放行（镜像源不需要凭据）
+        assert_eq!(
+            maxmind_credential_error("p3terx", None, None, NONE_STORED),
+            None
+        );
+    }
+
+    #[test]
+    fn unreadable_credential_is_named_as_unreadable_not_missing() {
+        // 存了但解不开 ⇒ 点名"无法解密"，而不是"请填写凭据"
+        let broken = CredentialFacts {
+            account_present: true,
+            account_unreadable: true,
+            license_present: true,
+            license_unreadable: false,
+        };
+        assert_eq!(
+            maxmind_credential_error("maxmind", None, None, broken),
+            Some(CredentialGap::Unreadable)
+        );
+        // 本次重新填了坏的那一列 ⇒ 新值可用，放行（"重填即修好"必须是可走通的路径）
+        assert_eq!(
+            maxmind_credential_error("maxmind", Some("id"), None, broken),
+            None
+        );
+        // 显式清空（Some("")）意味着这一列将被写空 ⇒ 仍不可用，且理由是"没填"而非"解不开"
+        assert_eq!(
+            maxmind_credential_error("maxmind", Some(""), Some(""), ALL_GOOD),
+            Some(CredentialGap::NotStored)
+        );
+        // 两列坏法并存 ⇒ 仍然报"解不开"（更可操作的那一条优先）
+        assert_eq!(
+            maxmind_credential_error(
+                "maxmind",
+                None,
+                None,
+                CredentialFacts {
+                    account_present: true,
+                    account_unreadable: true,
+                    license_present: false,
+                    license_unreadable: false,
+                }
+            ),
+            Some(CredentialGap::Unreadable)
+        );
+    }
+
+    /// 两条坏法必须各自给出**一条不同的**文案（判据调用 `gap_message` 取返回值）。
+    ///
+    /// 为什么不扫文本：本批第一版就是这么写的，而盘上变异把 `Unreadable` 分支改成与
+    /// `NotStored` 同一个键之后**照常绿**——同一个键名在本文件的 `update_now` 里也在用，
+    /// needle 永远命中（㉔/㊴"正向 needle 会被别处的合法字面量洗绿"的第三次复发）。
+    /// 现在判的是产出：两个变体各调一次，结果必须非空且互不相等。
+    /// 键能否在 zh/en 双语解析，由既有总锁 `every_i18n_key_literal_resolves_in_all_locales`
+    /// 负责（它扫 `tr!` 字面量），本条不重复判、也不因此放松"必须不同"这一判据。
+    #[test]
+    fn the_two_gaps_render_two_distinct_messages() {
+        let not_stored = gap_message(CredentialGap::NotStored);
+        let unreadable = gap_message(CredentialGap::Unreadable);
+        assert!(!not_stored.trim().is_empty(), "『没存过』的文案为空");
+        assert!(!unreadable.trim().is_empty(), "『解不开』的文案为空");
+        assert_ne!(
+            not_stored, unreadable,
+            "两条坏法被并成一条 ⇒ 运维会照着『请填写凭据』去重填一个库里本来就有的凭据\
+             （not_stored={not_stored} unreadable={unreadable}）"
+        );
+    }
 }

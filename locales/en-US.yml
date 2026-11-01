@@ -391,6 +391,7 @@ error:
     source_invalid: Update source must be maxmind or p3terx
     unknown_source_type: "Unknown update source type: %{s}"
     maxmind_credentials_required: Switching to maxmind source requires Account ID and License Key
+    credentials_unreadable: Stored MaxMind credentials cannot be decrypted (master key missing, rotated, or ciphertext damaged); re-save the credentials in the admin console
     private_ip: Private IP
     update_unavailable: IP database update service temporarily unavailable, please try again later
     update_in_progress: An IP database update task is already in progress, please try again later

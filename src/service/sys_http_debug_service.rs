@@ -75,6 +75,56 @@ pub struct HttpDebugDto {
     pub timeout_secs: Option<u64>,
 }
 
+/// 归一化 + 静态校验后的出站参数（**纯计算，不含任何 I/O**）。
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    /// 已 trim、大写、并在本模块私有常量 `ALLOWED_METHODS` 白名单内
+    pub method: String,
+    /// 已通过 scheme / 地址 / 保留域名静态 SSRF 校验的目标
+    pub base_url: url::Url,
+    /// 已夹取到本模块私有常量 `MAX_TIMEOUT_SECS` 的出站超时
+    pub timeout: Duration,
+    /// 已按方法语义规范化的请求体（GET/HEAD/OPTIONS 一律为空）
+    pub body: String,
+}
+
+/// 参数规范化 + URL **静态** SSRF 校验：不发网络请求、不解析 DNS，因此可以在占闸之前跑。
+///
+/// b145 把这一段从 `execute` 里抽出来单独成为一个可先调用的入口，起因是实测：处理器第一句就
+/// `try_enter(HttpDebugExecute)`（permits=2），于是"URL 写错了"这种**根本不会出网**的请求
+/// 也要先在闸后面排队——闸满时它收到 429「该操作正在进行中」，而正确答案是 400「URL 格式非法」。
+/// 并发闸保护的是重活（出站 + 读体 + 跟随重定向），把输入校验挡在闸后等于让背压冒充参数错误
+/// （AGENTS「闸的顺序也是判据」⑨ 与 b129「以受影响范围分片」的同族：判据要问"这一刻谁在做重活"）。
+///
+/// 抽出来而不是复制一份：同一套规则写两遍必然漂（㉘），所以 `execute` 现在也走这一条，
+/// 校验只有一份实现；DNS 那一半仍留在 `execute` 内（它是真实工作的一部分，必须在闸之后）。
+pub fn precheck(dto: &HttpDebugDto) -> Result<Prepared, ServiceError> {
+    let method = dto.method.trim().to_ascii_uppercase();
+    if !ALLOWED_METHODS.contains(&method.as_str()) {
+        return Err(ServiceError::bad_request(pick(
+            "不支持的 HTTP 方法",
+            "Unsupported HTTP method",
+        )));
+    }
+    let timeout = Duration::from_secs(
+        dto.timeout_secs
+            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .min(MAX_TIMEOUT_SECS),
+    );
+    let base_url = ssrf::validate_url(dto.url.trim()).map_err(|e| ServiceError::bad_request(&e))?;
+    let mut body = dto.body.clone().unwrap_or_default();
+    if !body.is_empty() && matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS") {
+        // 校验：GET/HEAD/OPTIONS 不应携带 body，忽略之
+        body = String::new();
+    }
+    Ok(Prepared {
+        method,
+        base_url,
+        timeout,
+        body,
+    })
+}
+
 /// 响应头输出项
 #[derive(Debug, serde::Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -143,32 +193,17 @@ impl SysHttpDebugService {
 
     /// 执行一次调试请求（可选地跟随安全重定向链）
     pub async fn execute(&self, dto: HttpDebugDto) -> Result<HttpDebugVo, ServiceError> {
-        // ===== 1. 参数规范化 =====
-        let method = dto.method.trim().to_ascii_uppercase();
-        if !ALLOWED_METHODS.contains(&method.as_str()) {
-            return Err(ServiceError::bad_request(pick(
-                "不支持的 HTTP 方法",
-                "Unsupported HTTP method",
-            )));
-        }
-        let timeout = Duration::from_secs(
-            dto.timeout_secs
-                .unwrap_or(DEFAULT_TIMEOUT_SECS)
-                .min(MAX_TIMEOUT_SECS),
-        );
+        // ===== 1–3. 参数规范化 + URL 静态校验（纯计算，见 `precheck` 的立项原因）=====
+        let prepared = precheck(&dto)?;
+        // 重定向链上 301/303 会改写方法与目标（下方循环里赋值），所以这两份必须可变
+        let mut current_method = prepared.method;
+        let mut base_url = prepared.base_url;
+        let timeout = prepared.timeout;
+        // 303 之后不带请求体（下方循环里 `body.clear()`），所以必须可变
+        let mut body = prepared.body;
 
-        // ===== 2. 目标 URL 静态 + 动态 SSRF 校验 =====
-        let mut base_url =
-            ssrf::validate_url(dto.url.trim()).map_err(|e| ServiceError::bad_request(&e))?;
+        // ===== 2b. 动态 SSRF 校验（要解析 DNS，属"真实工作"，排在并发闸之后）=====
         self.validate_dns(&base_url).await?;
-
-        // ===== 3. 请求体与 method 规范化 =====
-        let mut current_method = method;
-        let mut body = dto.body.clone().unwrap_or_default();
-        if !body.is_empty() && matches!(current_method.as_str(), "GET" | "HEAD" | "OPTIONS") {
-            // 校验：GET/HEAD/OPTIONS 不应携带 body，忽略之
-            body = String::new();
-        }
 
         // ===== 5. 手动安全跟随重定向链 =====
         // b74（AGENTS B.4）：调试器是**用户指定目标**的出网面，故障面与任何内置依赖都不同，
@@ -398,6 +433,67 @@ mod tests {
             !ALLOWED_METHODS.contains(&"TRACE"),
             "密码级方法 TRACE 不得开放"
         );
+    }
+
+    /// b145：`precheck` 是"闸之前"的那一段，因此它必须**只做纯计算**且把所有
+    /// 调用方可自行修复的输入错误都归成 400。测试直接调它（不经 HTTP），
+    /// 这样"非法输入不需要并发许可"这句话有独立的证伪载体。
+    #[test]
+    fn precheck_normalizes_without_any_io_and_rejects_bad_input_with_400() {
+        let dto =
+            |method: &str, url: &str, body: Option<&str>, timeout: Option<u64>| HttpDebugDto {
+                method: method.to_string(),
+                url: url.to_string(),
+                headers: Vec::new(),
+                body: body.map(|s| s.to_string()),
+                timeout_secs: timeout,
+            };
+        // 归一化三件事：方法大写、GET 不带体、超时夹到上限
+        let p = precheck(&dto(
+            "post",
+            "https://api.example.com/debug",
+            None,
+            Some(999),
+        ))
+        .expect("合法入参必须过 precheck");
+        assert_eq!(p.method, "POST");
+        assert_eq!(p.timeout, Duration::from_secs(MAX_TIMEOUT_SECS));
+        let p = precheck(&dto(
+            "get",
+            "https://api.example.com/debug",
+            Some("x"),
+            None,
+        ))
+        .expect("GET 合法");
+        assert!(p.body.is_empty(), "GET 的 body 必须被规范化掉");
+        assert_eq!(
+            precheck(&dto("post", "https://api.example.com/debug", None, None))
+                .expect("默认超时")
+                .timeout,
+            Duration::from_secs(DEFAULT_TIMEOUT_SECS)
+        );
+        // 四类坏输入一律 400，且不因任何 I/O 变成 500/429。
+        // 每条都只用**未被 SSRF 拦的合法主机**（`api.example.com`，见 ssrf.rs 的同名正控）——
+        // 否则一条会因"保留域名后缀"这一无关理由被拒，判据红在哪一维就丢了（⑨ 的文案纪律）。
+        for (case, bad) in [
+            (
+                "方法不在白名单",
+                dto("TRACE", "https://api.example.com/debug", None, None),
+            ),
+            (
+                "协议不是 http(s)",
+                dto("get", "ftp://api.example.com/x", None, None),
+            ),
+            (
+                "环回地址（SSRF 静态档）",
+                dto("get", "http://127.0.0.1/x", None, None),
+            ),
+            ("URL 根本不成形", dto("get", "not a url", None, None)),
+        ] {
+            let err = precheck(&bad).expect_err(&format!("{case} 必须被拒"));
+            assert_eq!(err.code, 400, "{case} 的结局应是 400，实际 {}", err.code);
+            assert!(!err.message.trim().is_empty(), "{case} 的文案不得为空");
+        }
     }
 
     #[test]

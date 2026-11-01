@@ -200,17 +200,21 @@ impl SmsProvider for GenericHttpProvider {
             .await
             .map_err(|e| format!("短信网关请求失败: {e}"))?;
         let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(format!(
-                "短信网关返回 {status}: {}",
-                body_text.chars().take(200).collect::<String>()
-            ));
+            let snippet =
+                crate::common::outbound_error_body::read_error_body(resp, "sms:generic").await;
+            return Err(format!("短信网关返回 {status}: {snippet}"));
         }
-        // 网关消息标识：尽力提取（body 前 120 字符作为留痕）
+        // 成功回单读不出来时必须上抛：旧写法折成空串 ⇒ "HTTP 200; body: "，
+        // 把"没读到"签成"网关给了空回单"（㊷：失败与没有必须可区分）
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| format!("短信网关响应体读取失败: {e}"))?;
+        // 网关消息标识：尽力提取（走公共遮蔽 + 截断，不再各处手搓 120 字符）
         Ok(format!(
             "HTTP {status}; body: {}",
-            body_text.chars().take(120).collect::<String>()
+            crate::common::outbound_error_body::mask_and_clip(&body_text)
         ))
     }
 }
@@ -443,17 +447,19 @@ impl AliyunSmsProvider {
             .await
             .map_err(|e| format!("阿里云短信请求失败: {e}"))?;
         let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(format!(
-                "阿里云短信返回 {status}: {}",
-                body_text.chars().take(200).collect::<String>()
-            ));
+            let snippet =
+                crate::common::outbound_error_body::read_error_body(resp, "sms:aliyun").await;
+            return Err(format!("阿里云短信返回 {status}: {snippet}"));
         }
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| format!("阿里云短信响应体读取失败: {e}"))?;
         let v: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
             format!(
                 "阿里云短信响应非 JSON: {e}; body={}",
-                body_text.chars().take(200).collect::<String>()
+                crate::common::outbound_error_body::mask_and_clip(&body_text)
             )
         })?;
         if v.get("Code").and_then(|x| x.as_str()) == Some("OK") {
@@ -599,13 +605,15 @@ impl TencentSmsProvider {
             .await
             .map_err(|e| format!("腾讯云短信请求失败: {e}"))?;
         let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(format!(
-                "腾讯云短信返回 {status}: {}",
-                body_text.chars().take(200).collect::<String>()
-            ));
+            let snippet =
+                crate::common::outbound_error_body::read_error_body(resp, "sms:tencent").await;
+            return Err(format!("腾讯云短信返回 {status}: {snippet}"));
         }
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| format!("腾讯云短信响应体读取失败: {e}"))?;
         let v: serde_json::Value =
             serde_json::from_str(&body_text).map_err(|e| format!("腾讯云短信响应非 JSON: {e}"))?;
         if let Some(err) = v.pointer("/Response/Error") {

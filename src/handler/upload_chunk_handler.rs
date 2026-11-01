@@ -117,6 +117,28 @@ pub async fn chunk_init(
     }))
 }
 
+/// multipart 读点失败 → 客户端可见文本的**唯一**折算（b145）。
+///
+/// 两件事一起做，各有各的理由：
+/// 1. 三个读点（`next_field` / `sessionId` / `partIndex`）共用同一条键与同一份折算，
+///    不在每个 `map_err` 里再手写一遍（㉘：同一句纪律写几遍就有几个严格度——改造前三处
+///    字面相同，任何一处想"顺手改文案"都会让另两处悄悄跟不上）；
+/// 2. 回显的细节先折叠文件系统绝对路径（C.9）。判据不是"这算不算敏感字段"，而是
+///    **"未认证者能从这条字符串推断出什么"**：`field.text()` 底下是临时文件写入，
+///    它的 `io::Error` 文本可以带 `D:\...\uploads\tmp\part-3.bin`，而那是部署目录
+///    （b73 那条 `/health` 泄漏路径的同族，只是这次走的是 400 响应体）。
+fn multipart_reject_detail(e: impl std::fmt::Display) -> String {
+    crate::common::redact::fold_abs_paths(&e.to_string())
+}
+
+/// [`multipart_reject_detail`] 的 400 包装（三处读点唯一出口）。
+fn multipart_rejected(e: impl std::fmt::Display) -> AppError {
+    AppError::bad_request(&crate::tr!(
+        "error.file.multipart_parse_failed",
+        e = multipart_reject_detail(e)
+    ))
+}
+
 /// POST /common/upload/chunk/part —— 上传单片
 ///
 /// multipart 字段：`sessionId` / `partIndex` / `file`（流式限长 ≤ 单请求 body 上限）。
@@ -130,15 +152,19 @@ pub async fn chunk_part(
     let mut part_index: Option<u32> = None;
     let mut part_bytes: Option<Vec<u8>> = None;
 
-    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
-        AppError::bad_request(&crate::tr!("error.file.multipart_parse_failed", e = e))
-    })? {
+    while let Some(mut field) = multipart.next_field().await.map_err(multipart_rejected)? {
         match field.name() {
             Some("sessionId") => {
-                session_id = field.text().await.unwrap_or_default();
+                // b145：读失败不得折成空串。旧写法让一个传输层故障走进 `validate_session_id`
+                // 的"格式非法"分支 ⇒ 客户端被告知"sessionId 非法"，而它明明给了合法的那个，
+                // 照着提示重试永远失败（"失败"被写成"用户的错"，同㊷那一族在入站侧的断面）。
+                session_id = field.text().await.map_err(multipart_rejected)?;
             }
             Some("partIndex") => {
-                part_index = field.text().await.ok().and_then(|t| t.trim().parse().ok());
+                // 同一族的第二处：读失败 ≠ "没带 partIndex"。旧写法把二者都折成 None，
+                // 于是连接中断被报成客户端漏字段；解析不出来才真的算缺失/非法。
+                let raw = field.text().await.map_err(multipart_rejected)?;
+                part_index = raw.trim().parse().ok();
             }
             Some("file") => {
                 // 单片 ≤ 全局 body limit；流式限长读取防 OOM
@@ -360,4 +386,64 @@ pub async fn chunk_abort(
     let root = resolve_upload_dir("uploads").await;
     cleanup_chunk_dir(&chunk_dir(&root, operator.tenant_id(), &session_id)).await;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.default")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ① C.9：客户端可见文本不得带文件系统绝对路径（合成违规形状 = 真实 io::Error 文本）。
+    #[test]
+    fn reject_detail_folds_windows_and_posix_paths() {
+        let win = multipart_reject_detail(
+            "failed to write the whole buffer: D:\\Projects\\stepby\\data\\uploads\\tmp\\part-3.bin: os error 28",
+        );
+        assert!(!win.contains("D:\\"), "Windows 绝对路径漏折叠：{win}");
+        assert!(!win.contains("Projects\\stepby"), "目录结构外流：{win}");
+        let posix = multipart_reject_detail(
+            "write /var/lib/stepby/uploads/tmp/part-1.bin failed: No space",
+        );
+        assert!(!posix.contains("/var/lib"), "POSIX 绝对路径漏折叠：{posix}");
+        // 折叠后仍可诊断：失败原因本体必须留着（不得退化成一句"出错了"）
+        assert!(win.contains("os error 28"), "把可诊断信息一起折掉了：{win}");
+        assert!(
+            posix.contains("No space"),
+            "把可诊断信息一起折掉了：{posix}"
+        );
+    }
+
+    /// ② 对照组（防"过度遮蔽"）：不含路径的普通文本必须逐字保留，
+    ///    否则这条折叠会把排障信息一起洗掉（与 b73 那条"同时钉住不误伤排障必需信息"同源）。
+    #[test]
+    fn reject_detail_keeps_plain_text_untouched() {
+        let plain = "field name is invalid or not present";
+        assert_eq!(multipart_reject_detail(plain), plain, "无路径文本被改写了");
+        let with_port = "connection reset while reading body (peer 10.0.0.7:8321)";
+        assert_eq!(
+            multipart_reject_detail(with_port),
+            with_port,
+            "端口/地址片段被误伤：部署与排障都需要它"
+        );
+    }
+
+    /// ③ 接线反查（计数，不是"出现过一次"）：三个 multipart 读点都必须走唯一出口。
+    ///    摘掉任意一处 ⇒ 那一处退回手写 `tr!(...)`，本条点名少了几处。
+    #[test]
+    fn every_multipart_read_site_goes_through_the_single_outlet() {
+        let cfg = crate::common::prod_scan::Scan::default();
+        let text =
+            crate::common::prod_scan::prod_file("src/handler/upload_chunk_handler.rs", &cfg).text();
+        let wired = text.matches("map_err(multipart_rejected)").count();
+        assert!(
+            wired >= 3,
+            "multipart 读点应至少 3 处走唯一出口，实测 {wired} ⇒ 有站点退回手写折算\
+             （路径折叠与文案口径会各自漂移）"
+        );
+        // 反向：生产码里不得再有绕过出口的内联折算
+        assert_eq!(
+            text.matches("error.file.multipart_parse_failed").count(),
+            1,
+            "键名出现次数应为 1（只在唯一出口里），实测更多 ⇒ 并行通道回来了"
+        );
+    }
 }
