@@ -159,6 +159,12 @@ impl SysTaskService {
     /// 更新任务进度（progress / current / total）
     ///
     /// progress 自动根据 current/total 计算（若 total > 0）
+    ///
+    /// b144 A5：**终态是终点**。改造前这里是"读整行 → 无条件写 `status=running`"，
+    /// 于是归档任务的迟到回调/双执行者会把已经 `success`/`failed` 的行倒着改回
+    /// `running`：管理端进度条从"已完成"重新走起来，而实际工作早已结束（既不是重试也
+    /// 不是新任务）。判断放在 `WHERE status IN (pending, running)` 里，与写成为同一个
+    /// 原子决定（AGENTS A.1 第三条——不需要额外一把锁）。
     pub async fn update_progress(
         &self,
         task_id: i64,
@@ -178,26 +184,40 @@ impl SysTaskService {
         } else {
             existing.progress
         };
-
-        // 多租户：系统侧（定时/异步）更新按任务行自身 tid 归属，禁止回落到 0
-        let owner_tid = existing.tenant_id;
         let now = crate::common::datetime::now_naive();
-        let mut am: SysTaskActiveModel = existing.into();
-        am.tenant_id = Set(owner_tid);
-        am.status = Set("running".to_string());
-        am.progress = Set(progress);
-        am.current = Set(current);
-        am.total = Set(total);
-        am.update_time = Set(Some(now));
 
-        let model = self.task_repo.update(am).await?;
-
-        // P0-2：定向推送给任务创建者
-        Self::push_task_progress(state, &model);
-        Ok(model)
+        let written = self
+            .task_repo
+            .advance_progress_if_open(task_id, progress, current, total, now)
+            .await?;
+        match written {
+            Some(model) => {
+                // P0-2：定向推送给任务创建者
+                Self::push_task_progress(state, &model);
+                Ok(model)
+            }
+            // 没有行被写 ⇒ 该行已不在未结束态（或刚好被并发落终态）。**不推送**——
+            // 推送会把前端浮层里已收起的进度条重新点亮。
+            None => {
+                let row =
+                    self.task_repo.find_by_id(task_id).await?.ok_or_else(|| {
+                        ServiceError::not_found(&crate::tr!("error.task.not_found"))
+                    })?;
+                tracing::warn!(
+                    task_id = task_id,
+                    status = %row.status,
+                    "任务进度更新被忽略：该行已处于终态（迟到的回调不得把已结束的任务改回 running）"
+                );
+                Ok(row)
+            }
+        }
     }
 
     /// 完成任务（success）
+    ///
+    /// b144 A5：同 `update_progress`——终态之间不得互相覆盖。重复完成（幂等）返回现状
+    /// 且不重复推送；已失败的行**不能**被一条迟到的成功回调改成成功（那是把真实故障
+    /// 洗成"这轮跑好了"，比进度条倒走更坏）。
     pub async fn complete_task(
         &self,
         task_id: i64,
@@ -211,25 +231,43 @@ impl SysTaskService {
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
         let final_current = existing.total;
-        // 多租户：系统侧更新按任务行自身 tid 归属，禁止回落到 0
-        let owner_tid = existing.tenant_id;
         let now = crate::common::datetime::now_naive();
-        let mut am: SysTaskActiveModel = existing.into();
-        am.tenant_id = Set(owner_tid);
-        am.status = Set("success".to_string());
-        am.progress = Set(100);
-        am.current = Set(final_current);
-        am.result_msg = Set(result_msg);
-        am.update_time = Set(Some(now));
-
-        let model = self.task_repo.update(am).await?;
-
-        // P0-2：定向推送给任务创建者（含结果消息）
-        Self::push_task_progress(state, &model);
-        Ok(model)
+        let written = self
+            .task_repo
+            .settle_if_open(task_id, "success", 100, final_current, result_msg, now)
+            .await?;
+        match written {
+            Some(model) => {
+                Self::push_task_progress(state, &model);
+                Ok(model)
+            }
+            None => {
+                let row =
+                    self.task_repo.find_by_id(task_id).await?.ok_or_else(|| {
+                        ServiceError::not_found(&crate::tr!("error.task.not_found"))
+                    })?;
+                match row.status.as_str() {
+                    // 幂等：同一任务被重复标记完成（重试、双执行者）⇒ 现状即答案
+                    "success" => {
+                        tracing::debug!(task_id = task_id, "任务已完成，重复 complete 幂等返回");
+                    }
+                    other => {
+                        tracing::warn!(
+                            task_id = task_id,
+                            status = %other,
+                            "任务 complete 被忽略：该行已落终态且不是 success（迟到的成功回调不得改写失败结论）"
+                        );
+                    }
+                }
+                Ok(row)
+            }
+        }
     }
 
     /// 标记任务失败
+    ///
+    /// b144 A5：同上——已成功的行不得被一条迟到的失败回调改成失败（那会把已完成的事实
+    /// 抹掉，而归档文件其实已经产出）。
     pub async fn fail_task(
         &self,
         task_id: i64,
@@ -242,20 +280,44 @@ impl SysTaskService {
             .await?
             .ok_or_else(|| ServiceError::not_found(&crate::tr!("error.task.not_found")))?;
 
-        // 多租户：系统侧更新按任务行自身 tid 归属，禁止回落到 0
-        let owner_tid = existing.tenant_id;
         let now = crate::common::datetime::now_naive();
-        let mut am: SysTaskActiveModel = existing.into();
-        am.tenant_id = Set(owner_tid);
-        am.status = Set("failed".to_string());
-        am.result_msg = Set(Some(error_msg));
-        am.update_time = Set(Some(now));
-
-        let model = self.task_repo.update(am).await?;
-
-        // P0-2：定向推送给任务创建者（含失败原因）
-        Self::push_task_progress(state, &model);
-        Ok(model)
+        // 进度与当前值保持原样（失败不代表"什么都没做完"，进度是事实）
+        let written = self
+            .task_repo
+            .settle_if_open(
+                task_id,
+                "failed",
+                existing.progress,
+                existing.current,
+                Some(error_msg),
+                now,
+            )
+            .await?;
+        match written {
+            Some(model) => {
+                Self::push_task_progress(state, &model);
+                Ok(model)
+            }
+            None => {
+                let row =
+                    self.task_repo.find_by_id(task_id).await?.ok_or_else(|| {
+                        ServiceError::not_found(&crate::tr!("error.task.not_found"))
+                    })?;
+                match row.status.as_str() {
+                    "failed" => {
+                        tracing::debug!(task_id = task_id, "任务已失败，重复 fail 幂等返回");
+                    }
+                    other => {
+                        tracing::warn!(
+                            task_id = task_id,
+                            status = %other,
+                            "任务 fail 被忽略：该行已落终态且不是 failed（已成功的事实不被抹掉）"
+                        );
+                    }
+                }
+                Ok(row)
+            }
+        }
     }
 
     /// 定向推送 taskProgress 到任务创建者（P0-2 越权广播修复）

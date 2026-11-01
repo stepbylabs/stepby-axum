@@ -276,6 +276,7 @@ pub async fn restore(
 
     // 恢复成功后清理业务缓存，避免缓存与恢复后的数据库数据不一致
     // 清理范围：字典(dict:*)、系统配置(config:*)、限流配置(rate_limit:config:*)、
+    //          租户路由(tenant:code:* / tenant:host:*)、
     //          用户权限(perm:user:*，走 perm_cache 单一实现——Redis 档下它是恢复前
     //          DB 算出来的派生数据，恢复后继续命中会放行已不存在的权限)
     // 不清理：blacklist/online/pwd_ver/captcha 等会话/安全相关 key（清理会导致用户登出）
@@ -287,12 +288,37 @@ pub async fn restore(
     // 还有进程内 local_cache，恢复后 ≤10s 内仍使用旧配置，多实例部署时影响面放大。
     state.rate_limit_service.invalidate_all_cache().await;
 
+    // b144：调度器按恢复后的库重同步。调度器持有的是**注册那一刻的任务行快照**
+    // （`add_job` 把整行 clone 进 cron 闭包），恢复后不重同步就会出现三种"界面与事实分家"：
+    // 备份里已删/已停的任务照跑、被改过的 cron 按旧值跑、备份里新增的启用任务永远不跑。
+    //
+    // 失败**不**把恢复判成 500：库已经恢复完了，此时报失败会诱导运维再点一次恢复，
+    // 而那才是真正不可逆的动作。结局改为 ERROR + 明确的人工出口。
+    if let Err(e) = state.job_service.resync_jobs_after_restore().await {
+        tracing::error!(
+            error = %e,
+            "备份恢复后定时任务重同步失败：调度器仍持有恢复前的任务快照，\
+             请重启服务或在『定时任务』页对相应任务手动『立即执行/启停』以刷新"
+        );
+    }
+
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.restore")))
 }
 
 /// 清理业务相关缓存（恢复备份后调用）
 async fn clear_business_caches(state: &Arc<AppState>) {
-    let patterns = ["dict:*", "config:*", "rate_limit:config:*"];
+    // `tenant:code:*` / `tenant:host:*` 是**租户路由**缓存（X-Tenant-Code / Host 头 → tid，
+    // cache-aside TTL 300s）。恢复之后 tid 集合变了而缓存没变，后果不是"数据旧了 5 分钟"，
+    // 而是**请求被路由到另一个租户的隔离谓词上**（AGENTS 全局铁律 1：读侧与写侧必须共用
+    // 同一个租户谓词；这里连"哪个租户"都错）。它不是会话/安全 key，清掉只是让下一跳回源
+    // 重读 DB，零副作用，因此必须进这一份清单。
+    let patterns = [
+        "dict:*",
+        "config:*",
+        "rate_limit:config:*",
+        "tenant:code:*",
+        "tenant:host:*",
+    ];
     for pattern in &patterns {
         // 全量扫描（不截断）后删除——恢复后必须清干净，否则缓存与恢复后的 DB 不一致；
         // 单次 SCAN 失败仅告警并跳过该 pattern（与原游标循环失败 break 语义一致）
@@ -452,4 +478,172 @@ pub async fn remove(
 
     state.backup_service.delete_backups(ids).await?;
     Ok(AjaxResult::success_msg(&crate::tr!("msg.success.delete")))
+}
+
+#[cfg(test)]
+/// 备份恢复「收尾动作」的形状锁（b144）
+mod restore_post_action_lock {
+    /// 恢复成功后必须清掉的缓存族。**每一条都对应一个"恢复后仍然命中旧值"的真实故障面**，
+    /// 其中 `tenant:*` 两支是租户**路由**缓存——命中旧值不是"数据旧"，是请求被挂到另一个
+    /// 租户的隔离谓词上（AGENTS 全局铁律 1）。
+    const REQUIRED_PATTERNS: [&str; 5] = [
+        "dict:*",
+        "config:*",
+        "rate_limit:config:*",
+        "tenant:code:*",
+        "tenant:host:*",
+    ];
+    const RESYNC: &str = "resync_jobs_after_restore";
+    const PERM_INVALIDATE: &str = "invalidate_all_perm_cache";
+    /// 恢复失败的出口：所有"恢复成功之后"的动作都必须排在它之后
+    const SUCCESS_GATE: &str = "result?;";
+
+    /// 顶层函数体：从 `header` 到下一个**顶格** `}`（`restore` 里字符串不含裸换行花括号，
+    /// 因此顶格右括号只可能是函数结束）。
+    fn top_level_body(text: &str, header: &str) -> Option<String> {
+        let start = text.find(header)?;
+        let rest = &text[start..];
+        let end = rest.find("\n}")?;
+        Some(rest[..end + 2].to_string())
+    }
+
+    /// 从 `let patterns = [ ... ];` 里把引号内的族名取回来（**读语义不读字节**，
+    /// 否则 `cargo fmt` 把数组折成一行就永远对不上——AGENTS ⑰ 同一课）
+    fn patterns_declared(text: &str) -> Vec<String> {
+        let Some(start) = text.find("let patterns = [") else {
+            return Vec::new();
+        };
+        let rest = &text[start + "let patterns = [".len()..];
+        let Some(end) = rest.find(']') else {
+            return Vec::new();
+        };
+        let segment = &rest[..end];
+        let mut out = Vec::new();
+        let mut chars = segment.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '"' {
+                continue;
+            }
+            let mut s = String::new();
+            while let Some(&n) = chars.peek() {
+                chars.next();
+                if n == '"' {
+                    break;
+                }
+                s.push(n);
+            }
+            out.push(s);
+        }
+        out
+    }
+
+    /// 判据本体：返回"缺了什么"（空表 = 收尾动作完整）
+    fn gaps(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let body = match top_level_body(text, "pub async fn restore(") {
+            Some(b) => b,
+            None => return vec!["找不到 restore 处理器函数体（判据输入坏了）".to_string()],
+        };
+        let declared = patterns_declared(text);
+        for p in REQUIRED_PATTERNS {
+            if !declared.iter().any(|d| d == p) {
+                out.push(format!("恢复后未清理缓存族 {p}"));
+            }
+        }
+        if !body.contains(PERM_INVALIDATE) {
+            out.push("恢复后未失效权限缓存（perm_cache 单一实现）".to_string());
+        }
+        match (body.find(SUCCESS_GATE), body.find(RESYNC)) {
+            (None, _) => out.push(
+                "恢复失败出口缺失（找不到 `result?;`，收尾动作可能在失败时也跑）".to_string(),
+            ),
+            (_, None) => out.push("恢复后未重同步定时任务调度器".to_string()),
+            (Some(gate), Some(resync)) if resync < gate => {
+                out.push("调度器重同步排在恢复失败出口之前（失败时也会改调度状态）".to_string());
+            }
+            _ => {}
+        }
+        out
+    }
+
+    /// 真实树正控：恢复链的四个收尾动作齐备（缓存 5 族 + 权限失效 + 限流进程内缓存 + 调度器重同步）
+    #[test]
+    fn restore_wires_every_post_action() {
+        let f = crate::common::prod_scan::prod_file(
+            "src/handler/sys_backup_handler.rs",
+            &crate::common::prod_scan::Scan::default(),
+        );
+        let text = f.text();
+        let missing = gaps(&text);
+        assert!(
+            missing.is_empty(),
+            "恢复后的收尾动作有缺口：\n{}",
+            missing.join("\n")
+        );
+        // 采集面自证：patterns 必须真的解析出 5 条（解析器写坏了会"0 缺口"恒绿）
+        assert_eq!(
+            patterns_declared(&text).len(),
+            REQUIRED_PATTERNS.len(),
+            "patterns 解析结果与本常量表条数不符，说明采集口径腐化：{:?}",
+            patterns_declared(&text)
+        );
+        // 限流服务进程内缓存在**这一侧**的判据面里（P0-H2 那条既有约束，别让它静默消失）
+        let body = top_level_body(&text, "pub async fn restore(").unwrap();
+        assert!(
+            body.contains("invalidate_all_cache()"),
+            "恢复后未失效限流服务的进程内 local_cache"
+        );
+    }
+
+    /// 活性反证：三种"退回缺陷形状"都必须被抓（缺一条即说明那条判据是虚锁）
+    #[test]
+    fn the_post_action_lock_is_falsifiable() {
+        let good = "pub async fn restore() {\n    let r = f().await;\n    result?;\n    clear_business_caches().await;\n    invalidate_all_perm_cache().await;\n    state.rate_limit_service.invalidate_all_cache().await;\n    resync_jobs_after_restore().await;\n}\nfn other() {}\nlet patterns = [\"dict:*\", \"config:*\", \"rate_limit:config:*\", \"tenant:code:*\", \"tenant:host:*\"];";
+        // 把 patterns 声明补到同一份文本里，好让三条反证各自只红自己那一条
+        let with_patterns = |s: &str| {
+            format!(
+                "{s}\nlet patterns = [\"dict:*\", \"config:*\", \"rate_limit:config:*\", \"tenant:code:*\", \"tenant:host:*\"];"
+            )
+        };
+        assert!(
+            gaps(&with_patterns(good)).is_empty(),
+            "合规合成文本不得报红：{:?}",
+            gaps(&with_patterns(good))
+        );
+        // ① 摘掉调度器重同步
+        let no_resync = good.replace("    resync_jobs_after_restore().await;\n", "");
+        assert!(
+            gaps(&with_patterns(&no_resync))
+                .iter()
+                .any(|g| g.contains("调度器")),
+            "摘掉重同步必须被抓"
+        );
+        // ② 把重同步挪到失败出口之前
+        let early = good.replace(
+            "    result?;\n    clear_business_caches().await;",
+            "    resync_jobs_after_restore().await;\n    result?;\n    clear_business_caches().await;",
+        );
+        let early = early.replace("    resync_jobs_after_restore().await;\n}\n", "}\n");
+        assert!(
+            gaps(&with_patterns(&early))
+                .iter()
+                .any(|g| g.contains("之前")),
+            "重同步排在失败出口之前必须被抓"
+        );
+        // ③ 租户路由缓存从 patterns 里掉出去（写成"只清三族"的旧形状）
+        let old_patterns = "pub async fn restore() {\n    result?;\n    clear_business_caches().await;\n    invalidate_all_perm_cache().await;\n    resync_jobs_after_restore().await;\n}\nlet patterns = [\"dict:*\", \"config:*\", \"rate_limit:config:*\"];";
+        let g = gaps(old_patterns);
+        assert_eq!(
+            g.iter().filter(|x| x.contains("tenant:")).count(),
+            2,
+            "丢掉两支租户路由缓存必须各报一条：{g:?}"
+        );
+        // ④ 解析器失效（patterns 声明整段不见了）同样必须报，而不是"0 缺口"
+        assert!(
+            gaps("pub async fn restore() {\n    result?;\n    invalidate_all_perm_cache().await;\n    resync_jobs_after_restore().await;\n}")
+            .len()
+            >= REQUIRED_PATTERNS.len(),
+            "patterns 缺失必须报满 5 条缺口，不得静默"
+        );
+    }
 }

@@ -321,7 +321,14 @@ impl SysConfigService {
     /// 运行时读取（登录开关/默认密码等）允许读取 platform_only 的平台值（例如租户必须遵循
     /// 平台下发的 captchaEnabled）；`visible_to_tenant` 治理的是**运维界面可见性**（见列表视图）。
     ///
-    /// 返回 `Option<String>`：Some(value) 存在；None 不存在或 Redis/DB 错误（调用方按业务默认值处理）。
+    /// 返回 `Result<Option<String>, ServiceError>`：
+    /// - `Ok(Some(v))` 配置存在；
+    /// - `Ok(None)` **配置行缺失**（合法状态，调用方可按业务默认值处理）；
+    /// - `Err` **DB 读失败**——缓存层自身故障只降级为回源（`read/write_cache_layer` 内部吞掉），
+    ///   所以 `Err` 只剩"权威存储读不出来"这一种含义，调用方**不得**把它折成 `Ok(None)`：
+    ///   那等于把服务故障写成"这个参数没配"，随后用兜底值落库（b144 A2 的成因正是旧注释
+    ///   「None 不存在或 Redis/DB 错误（调用方按业务默认值处理）」——签名是 `Result` 而注释
+    ///   描述的是 `Option`，读注释的人就把 `?` 写成了 `.ok().flatten()`）。
     pub async fn get_config_value_by_key_cached(
         &self,
         config_key: &str,

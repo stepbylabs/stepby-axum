@@ -37,6 +37,37 @@ const TOTP_ENABLED_TTL_SECS: u64 = 10 * 365 * 24 * 3600;
 // 原子化失败计数脚本（原 TOTP_FAIL_SCRIPT：INCR + 首次 EXPIRE，防计数永不过期）
 // 已收敛为 `store.incr_with_ttl(key, ttl)`（与原脚本语义逐字等价，实现封入 shared_store）。
 
+/// `totp:enabled:{user_id}` 读取结果的**唯一映射点**（b144 A1）。
+///
+/// ## 为什么必须有单一实现
+///
+/// 「没有启用」与「读不出有没有启用」是两种事实：前者是业务态（404 未启用，用户可以去
+/// 启用），后者是服务态（503，用户什么都做不了，只能等或找运维）。改造前三处调用点各有
+/// 一套口径——`status` 与 `verify` 把同一个读失败映射成 503
+/// `error.totp.status_check_failed`，而 `disable` 把它映射成 404
+/// `error.totp.not_enabled`：Redis 抖动时用户看到"你本来就没开 2FA"，而 2FA 实际仍在
+/// 生效，关闭 MFA 这个动作于是**静默失败**（用户以为已经关掉，下次登录仍被要求验证码）。
+/// 判据不能散在三个 handler 里各写一遍（同 AGENTS C.8 错误契约、C.10 敏感操作口径）。
+///
+/// 返回值刻意保留 `Option`：**只有** `Ok(None)` 才代表"确实未启用"，调用方据此再决定
+/// 是 `is_some()`（status/verify 的存在性判定）还是 `ok_or_else(not_found)`（disable 需要
+/// 取出 secret 本体）。
+fn map_enabled_lookup(
+    result: Result<Option<String>, crate::shared_store::StoreError>,
+    user_id: i64,
+    operation: &str,
+) -> Result<Option<String>, AppError> {
+    result.map_err(|e| {
+        tracing::error!(
+            error = %e,
+            user_id = user_id,
+            operation = operation,
+            "TOTP enabled 键读取失败（fail-closed 返回 503，不伪装成未启用）"
+        );
+        AppError::new(503, crate::tr!("error.totp.status_check_failed"))
+    })
+}
+
 // ==================== DTO ====================
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -226,15 +257,8 @@ pub async fn verify(
     // 2. 已启用检查：已启用用户必须走 disable 后再重新绑定，防止 MFA 被接管
     //    （原 EXISTS → get().is_some()，共享态存储均为 string KV，语义等价）
     let enabled_key = format!("totp:enabled:{}", user_id);
-    let enabled = state
-        .store
-        .get(&enabled_key)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, user_id = user_id, "TOTP enabled 查询失败（fail-closed）");
-            AppError::new(503, crate::tr!("error.totp.status_check_failed"))
-        })?
-        .is_some();
+    let enabled =
+        map_enabled_lookup(state.store.get(&enabled_key).await, user_id, "verify")?.is_some();
     if enabled {
         return Err(AppError::bad_request(&crate::tr!(
             "error.totp.already_enabled"
@@ -329,15 +353,9 @@ pub async fn status(
     // P2 修复: 原 unwrap_or(false) 为 fail-open，存储故障时误报 TOTP 未启用，
     // 可能导致前端跳过 MFA 验证流程。改为 fail-closed：故障时返回 503。
     // （原 EXISTS → get().is_some()，共享态存储均为 string KV，语义等价）
-    let enabled = state
-        .store
-        .get(&redis_key)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, user_id = user_id, "TOTP status: 键存在性查询失败，fail-closed 返回 503");
-            AppError::new(503, crate::tr!("error.totp.status_check_failed"))
-        })?
-        .is_some();
+    // b144 A1：映射口径收进 `map_enabled_lookup` 单一实现（disable 曾把同一故障报成 404）。
+    let enabled =
+        map_enabled_lookup(state.store.get(&redis_key).await, user_id, "status")?.is_some();
 
     Ok(AjaxResult::success(TotpStatusResponse { enabled }))
 }
@@ -426,15 +444,14 @@ pub async fn disable(
         )));
     }
 
-    // 2. 验证 TOTP code
+    // 2. 取已启用的 secret
+    //    b144 A1：读失败一律 503（口径与 status/verify 同源）。改造前这里是
+    //    `map_err(|_| not_found("未启用"))`——Redis 抖动时"关闭 2FA"这个动作静默失败，
+    //    用户以为已经关掉，下次登录照旧被要求验证码，而屏幕上写的是"你根本没启用"。
     let redis_key = format!("totp:enabled:{}", user_id);
-    // 键不存在（未启用）与读取失败均收敛为 404（与原 GET nil → not_found 口径一致）
-    let encrypted_secret = state
-        .store
-        .get(&redis_key)
-        .await
-        .map_err(|_| AppError::not_found(&crate::tr!("error.totp.not_enabled")))?
-        .ok_or_else(|| AppError::not_found(&crate::tr!("error.totp.not_enabled")))?;
+    let encrypted_secret =
+        map_enabled_lookup(state.store.get(&redis_key).await, user_id, "disable")?
+            .ok_or_else(|| AppError::not_found(&crate::tr!("error.totp.not_enabled")))?;
 
     // C2-3 安全修复：解密从 Redis 读取的 TOTP secret
     let master_key = &state.config.config_enc_key;
@@ -532,5 +549,106 @@ mod tests {
             vec![1]
         );
         assert!(silent_state_drop_lines("if let Err(err) = state\n    .store").is_empty());
+    }
+
+    /// 「存储故障 → 404 未启用」这一形状必须全仓不存在（b144 A1）。
+    ///
+    /// 判据取 `map_err(` 起往后 200 字符窗口内是否出现 `error.totp.not_enabled`：
+    /// 404 只能由 `Ok(None)`（确实没启用）产生，不能由 `Err`（读不出来）产生。
+    fn store_error_mapped_to_not_enabled(text: &str) -> usize {
+        let stripped: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect();
+        let flat: String = stripped
+            .join("\n")
+            .chars()
+            .map(|c| if c.is_whitespace() { ' ' } else { c })
+            .collect();
+        let needle = "map_err(";
+        let mut hits = 0usize;
+        let mut from = 0usize;
+        while let Some(rel) = flat[from..].find(needle) {
+            let abs = from + rel;
+            let window: String = flat[abs..].chars().take(200).collect();
+            if window.contains("error.totp.not_enabled") {
+                hits += 1;
+            }
+            from = abs + needle.len();
+        }
+        hits
+    }
+
+    /// enabled 键的直接读取（不经映射点）逐行点名——"存在一次映射调用"不能证明
+    /// **每个**读取点都接了线（b134 的"存在一次 ≠ 每个入口"在 handler 面上的断面）。
+    fn enabled_reads_bypassing_the_mapping(text: &str) -> Vec<String> {
+        text.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| l.contains(".get(&enabled_key)") || l.contains(".get(&redis_key)"))
+            .filter(|l| !l.contains("map_enabled_lookup("))
+            .map(|l| l.trim().to_string())
+            .collect()
+    }
+
+    /// `enabled` 键的读取口径必须只有 `map_enabled_lookup` 一处实现：
+    /// 三个调用点全部经它，且旧的"Err 折成 404"形状必须不存在（含活性正控）。
+    #[test]
+    fn enabled_key_lookup_has_a_single_fail_closed_mapping() {
+        let text = prod_file("src/handler/totp_handler.rs", &Scan::default()).text();
+
+        // 1) 唯一实现 + 三个调用点（status / verify / disable）
+        assert_eq!(
+            text.matches("map_enabled_lookup(").count(),
+            4,
+            "enabled 键读取必须经 map_enabled_lookup 单一映射点（定义 1 + 调用 3）"
+        );
+        let unwired = enabled_reads_bypassing_the_mapping(&text);
+        assert!(
+            unwired.is_empty(),
+            "所有 enabled 键读取都必须走映射点，绕过者: {unwired:?}"
+        );
+
+        // 2) 真实树：Err → 404 的形状必须为 0 处
+        assert_eq!(
+            store_error_mapped_to_not_enabled(&text),
+            0,
+            "存储故障不得伪装成「未启用」"
+        );
+
+        // 3) 活性正控：缺陷形状必须被抓到
+        let defective = r#"
+            let secret = state
+                .store
+                .get(&redis_key)
+                .await
+                .map_err(|_| AppError::not_found(&crate::tr!("error.totp.not_enabled")))?
+                .ok_or_else(|| AppError::not_found(&crate::tr!("error.totp.not_enabled")))?;
+        "#;
+        assert_eq!(
+            store_error_mapped_to_not_enabled(defective),
+            1,
+            "把读失败折成 404 的旧形状必须被这条判据抓到（否则它就是虚锁）"
+        );
+
+        // 4) 反证：合规形状（Err → 503、None → 404）不得报
+        let compliant = r#"
+            let secret = map_enabled_lookup(state.store.get(&redis_key).await, user_id, "disable")?
+                .ok_or_else(|| AppError::not_found(&crate::tr!("error.totp.not_enabled")))?;
+        "#;
+        assert_eq!(
+            store_error_mapped_to_not_enabled(compliant),
+            0,
+            "None 分支给 404 是正确语义，不得判红"
+        );
+
+        // 5) 接线反查的活性：旧的裸读形状必须被点名
+        assert_eq!(
+            enabled_reads_bypassing_the_mapping(
+                "let e = state.store.get(&redis_key).await.unwrap_or_default();"
+            )
+            .len(),
+            1,
+            "绕过映射点的裸读必须被抓到"
+        );
     }
 }

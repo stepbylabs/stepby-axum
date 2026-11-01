@@ -21,7 +21,7 @@ use crate::entity::sys_job::{self, Column as JobColumn, Model as SysJobModel};
 use crate::entity::sys_job_log::{Column as JobLogColumn, Model as SysJobLogModel};
 use crate::repository::sys_job::SysJobRepository;
 use crate::repository::sys_job_log::SysJobLogRepository;
-use crate::scheduler::JobScheduler;
+use crate::scheduler::{JobReloadSummary, JobScheduler, SchedulerError};
 
 /// P3 修复: 定时任务枚举值白名单校验
 /// misfire_policy: "1"=立即执行, "2"=执行一次, "3"=放弃执行（可选，默认 "3"）
@@ -307,6 +307,29 @@ impl SysJobService {
         self.job_repo.base().db()
     }
 
+    /// **invoke_target 档位闸**（b144，多租户铁律的直接落点）。
+    ///
+    /// 为什么创建/编辑也要判（执行侧已有同一道闸）：只判执行侧会留下一类"任务能建、
+    /// 每次执行都失败"的行——失败写在 `sys_job_log` 里，管理员看到的是调度器报错，
+    /// 而不是"这条目标本来就不该由租户任务触发"。早拒给出可执行的纠正信息。
+    ///
+    /// 判据本身住在 `scheduler::registry::tenant_may_invoke`（纯函数），两处共用，
+    /// 不得在此重写一份档位表（两份实现必漂）。
+    fn guard_invoke_target(job_tid: i64, invoke_target: &str) -> Result<(), ServiceError> {
+        if crate::scheduler::registry::tenant_may_invoke(job_tid, invoke_target) {
+            return Ok(());
+        }
+        tracing::warn!(
+            tenant_id = job_tid,
+            target = invoke_target,
+            "拒绝保存定时任务：invoke_target 属平台专属，租户任务不得触发"
+        );
+        Err(ServiceError::forbidden(&crate::tr!(
+            "error.job.invoke_target_platform_only",
+            target = invoke_target
+        )))
+    }
+
     /// 分页查询任务列表
     ///
     /// 多租户 Phase 2：tenant_scope=Some(tid) 仅返回本租户任务；None（平台 0）不过滤。
@@ -395,6 +418,9 @@ impl SysJobService {
                 "error.job.cron_invalid"
             )));
         }
+        // b144：档位闸。新建行的归属租户就是操作者，故用 operator_tid；
+        // 与执行侧（`scheduler::execute_inner`）共用 `registry::tenant_may_invoke` 一份判据。
+        Self::guard_invoke_target(operator_tid, &dto.invoke_target)?;
 
         // 查重
         if let Some(_existing) = self
@@ -507,6 +533,11 @@ impl SysJobService {
                 "error.job.cron_invalid"
             )));
         }
+        // b144：档位闸用**行的归属租户**（不是操作者）——编辑不迁移 tenant_id，
+        // 执行侧判据取的是 `job.tenant_id`，两侧必须同一个主体口径，
+        // 否则会出现"平台代管时允许改、租户自己执行时被拒"的错位（AGENTS 铁律：
+        // 读侧与写侧共用同一租户谓词）。
+        Self::guard_invoke_target(existing.tenant_id, &dto.invoke_target)?;
 
         let old_status = existing.status.as_deref().unwrap_or("0").to_string();
         let new_status = dto.status.unwrap_or_else(|| old_status.clone());
@@ -683,6 +714,12 @@ impl SysJobService {
         operator_tid: i64,
     ) -> Result<(), ServiceError> {
         crate::common::i18n::validate(&dto)?;
+        // b144 A4：`status` 只有长度校验（`min=1,max=1`），任意单字节字符都能写库。
+        // 调度器只识别 0↔1 两种转移，于是 `status="9"` 会落进一个**没有任何分支处理**的状态：
+        // 启动装载按 `find_by_status("0")` 捞不到它（= 事实上停摆），而管理端按"非 1 即运行"
+        // 渲染时又显示成运行——两边口径相反且都不报错。add/edit 早就走 `validate_job_enum`，
+        // 这里是唯一漏网的写入口。
+        validate_job_enum(None, None, Some(dto.status.as_str()))?;
 
         let existing = self
             .job_repo
@@ -979,6 +1016,15 @@ impl SysJobService {
     /// 获取任务 Repository 引用（用于启动初始化时 load_from_db）
     pub fn job_repo(&self) -> &SysJobRepository {
         &self.job_repo
+    }
+
+    /// 备份恢复之后的调度器重同步（见 [`JobScheduler::reload_jobs`] 的三种错位）。
+    ///
+    /// 放在 service 侧而不是 handler 里拼 repo/scheduler：调度器与任务仓储的配对关系
+    /// 是本模块的私有不变量（`SysJobService::new` 把它们绑在一起），让调用方各取一次
+    /// 就可能出现"用 A 库的连接装载、摘掉的是 B 调度器"的形状。
+    pub async fn resync_jobs_after_restore(&self) -> Result<JobReloadSummary, SchedulerError> {
+        self.scheduler.reload_jobs(&self.job_repo).await
     }
 }
 

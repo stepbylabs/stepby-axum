@@ -258,10 +258,13 @@ impl AiConfigService {
                 "error.ai.config_missing"
             )));
         }
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| ServiceError::internal(&format!("client 构建失败: {e}")))?;
+        // b144：走 `outbound_client::build_with` ⇒ 宿主缺系统信任库时仍能用内嵌根证书出站
+        // （裸构造在这种宿主上必然失败，于是"测试连接"报的是"client 构建失败"，
+        // 而真正缺的是 ca-certificates——把人支使去查 AI 配置）。
+        let client = crate::common::outbound_client::build_with("ai_config_test", |b| {
+            b.timeout(std::time::Duration::from_secs(10))
+        })
+        .map_err(|e| ServiceError::internal(&format!("client 构建失败: {e}")))?;
         let url = format!(
             "{}/chat/completions",
             effective.base_url.trim_end_matches('/')
@@ -314,10 +317,12 @@ impl AiConfigService {
             return Ok(None);
         }
         let url = format!("{}/models", effective.base_url.trim_end_matches('/'));
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| ServiceError::internal(&format!("client 构建失败: {e}")))?;
+        // b144：与 chat/completions 那一支同口径（内嵌根证书回落），label 单独成桶——
+        // "列模型"与"测试连接"是两个动作，故障时运维需要知道是哪一条。
+        let client = crate::common::outbound_client::build_with("ai_config_models", |b| {
+            b.timeout(std::time::Duration::from_secs(10))
+        })
+        .map_err(|e| ServiceError::internal(&format!("client 构建失败: {e}")))?;
         let started = std::time::Instant::now();
         let resp = client
             .get(&url)

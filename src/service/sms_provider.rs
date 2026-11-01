@@ -45,9 +45,13 @@ impl SmsChannelConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .ok_or("config_json 缺少 gateway_url")?;
-        if !gateway_url.starts_with("http://") && !gateway_url.starts_with("https://") {
-            return Err(format!("gateway_url 必须为 http(s) URL: {gateway_url}"));
-        }
+        // B1：scheme / 主机名 / 保留后缀 / 链路本地-元数据段一并过一遍。
+        // 这里**只**用静态层：本函数是同步的（fail-closed 的配置解析），DNS 层在投递前由
+        // `sys_msg_service` 调 `guard_gateway_url` 再过。原先这里是裸 `starts_with`，
+        // 于是 `http://169.254.169.254/latest/meta-data/` 是"合法"的网关地址。
+        // 刻意不回显 URL 本体：厂商 webhook/网关地址的查询串常带凭据，而这些 Err(String)
+        // 会被调用方写进 `tracing::warn!`（C.9）。
+        crate::common::ssrf::validate_gateway_url_static(&gateway_url)?;
         let auth_header = v
             .get("auth_header")
             .and_then(|x| x.as_str())
@@ -122,7 +126,10 @@ pub trait SmsProvider: Send + Sync {
         if cfg.gateway_url.is_empty() {
             return Err("gateway_url 未配置".to_string());
         }
-        Ok(())
+        // B1：配置解析阶段只过了静态层（本函数族是同步的），"测试"按钮因此看不见
+        // **域名解析到元数据段**这一型。这里补上 DNS 层，让"测试通过"与实际投递的前置
+        // 条件一致——否则测试绿、投递全败是界面在撒谎。
+        crate::common::ssrf::guard_gateway_url(&cfg.gateway_url).await
     }
 }
 
@@ -148,7 +155,7 @@ pub struct GenericHttpProvider {
 impl GenericHttpProvider {
     pub fn new() -> Self {
         Self {
-            http: crate::common::outbound_client::build(
+            http: crate::common::outbound_client::build_delivery_client(
                 "sms:generic",
                 std::time::Duration::from_secs(5),
                 std::time::Duration::from_secs(15),
@@ -178,6 +185,9 @@ impl SmsProvider for GenericHttpProvider {
         phone: &str,
         content: &str,
     ) -> Result<String, String> {
+        // B1（DNS 层）：配置里的域名可能解析到链路本地/元数据段——静态层看不到这一层。
+        // 放在取客户端**之前**：一个连地址都不可用的渠道，不该把"宿主缺信任库"当成失败原因。
+        crate::common::ssrf::guard_gateway_url(&cfg.gateway_url).await?;
         let http = http_of(&self.http, "sms")?;
         let mut req = http
             .post(&cfg.gateway_url)
@@ -284,6 +294,11 @@ impl CloudSmsConfig {
                 _ => "https://sms.tencentcloudapi.com".to_string(),
             })
             .to_string();
+        // B1：`endpoint` 此前**一字未校验**——它同样直接进 `POST {endpoint}`，
+        // 填 `http://169.254.169.254/` 就是"用平台自己的凭据去敲云元数据端点"。
+        // 判据与通用网关同源（静态层；内网/环回形态仍放行，云厂商专有云与本地 listener 测试照旧可用）。
+        crate::common::ssrf::validate_gateway_url_static(&endpoint)
+            .map_err(|e| format!("config_json endpoint 无效：{e}"))?;
         let get = |k: &str| -> Result<String, String> {
             v.get(k)
                 .and_then(|x| x.as_str())
@@ -357,7 +372,7 @@ pub struct AliyunSmsProvider {
 impl AliyunSmsProvider {
     pub fn new() -> Self {
         Self {
-            http: crate::common::outbound_client::build(
+            http: crate::common::outbound_client::build_delivery_client(
                 "sms:aliyun",
                 std::time::Duration::from_secs(5),
                 std::time::Duration::from_secs(15),
@@ -398,6 +413,8 @@ impl AliyunSmsProvider {
         template_code: &str,
         params: &serde_json::Value,
     ) -> Result<String, String> {
+        // B1（DNS 层）：`endpoint` 是配置里的自由值，签名算完再发现地址不可用只是白烧一次 HMAC。
+        crate::common::ssrf::guard_gateway_url(&cfg.endpoint).await?;
         let nonce = uuid::Uuid::new_v4().to_string();
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let mut params_list: Vec<(String, String)> = vec![
@@ -468,7 +485,7 @@ pub struct TencentSmsProvider {
 impl TencentSmsProvider {
     pub fn new() -> Self {
         Self {
-            http: crate::common::outbound_client::build(
+            http: crate::common::outbound_client::build_delivery_client(
                 "sms:tencent",
                 std::time::Duration::from_secs(5),
                 std::time::Duration::from_secs(15),
@@ -491,6 +508,8 @@ impl TencentSmsProvider {
         template_code: &str,
         params: &serde_json::Value,
     ) -> Result<String, String> {
+        // B1（DNS 层）：与阿里云同一口径——`endpoint` 先过守卫再签名。
+        crate::common::ssrf::guard_gateway_url(&cfg.endpoint).await?;
         use hmac::{KeyInit, Mac};
         use sha2::Digest;
         // 变量值数组（模板参数有序集）；对象按 key 排序保证稳定序，数组原样

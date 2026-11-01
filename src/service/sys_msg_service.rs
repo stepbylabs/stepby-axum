@@ -730,34 +730,75 @@ impl SysMsgService {
             .await?;
         match channel.channel_type.as_str() {
             "email" => {
-                if !self.mailer.is_enabled() {
-                    return Err(ServiceError::bad_request(&crate::tr!(
-                        "error.msg.mail_disabled"
-                    )));
+                // b144：布尔 `is_enabled()` 把"没配"和"配了但坏了"折成一个 false，
+                // 于是渠道连通性测试在 SMTP 客户端构建失败时报"邮件未启用"——
+                // 用户照提示去开开关，而开关本来就是开的。三态各有自己的文案与码值。
+                match self.mailer.availability() {
+                    crate::service::mailer_service::MailAvailability::Ready => Ok(()),
+                    crate::service::mailer_service::MailAvailability::Off => Err(
+                        ServiceError::bad_request(&crate::tr!("error.msg.mail_disabled")),
+                    ),
+                    crate::service::mailer_service::MailAvailability::Broken => Err(
+                        ServiceError::new(503, crate::tr!("error.mail.transport_unavailable")),
+                    ),
                 }
-                Ok(())
             }
             "site" => Ok(()),
             "sms" => {
-                // G-07：sms 校验配置完整性（gateway_url/鉴权头配对等），fail-closed
-                let cfg = crate::service::sms_provider::SmsChannelConfig::from_config_json(
-                    channel.config_json.as_ref().map(|e| e.0.as_str()),
-                )
-                .map_err(|e| {
-                    tracing::warn!(
-                        "短信渠道 {} 连通性测试：配置无效: {}",
-                        channel.channel_code,
-                        e
-                    );
-                    ServiceError::bad_request(&crate::tr!("error.msg.sms_config_invalid"))
-                })?;
-                let provider = crate::service::sms_provider::GenericHttpProvider::new();
-                provider.probe(&cfg).await.map_err(|e| {
-                    ServiceError::bad_request(&format!(
-                        "{}: {e}",
-                        crate::tr!("error.msg.sms_config_invalid")
-                    ))
-                })
+                // G-07：sms 校验配置完整性（gateway_url/鉴权头配对等），fail-closed。
+                //
+                // b144 顺带修掉一个**长期存在的形状错配**：这一支原先无条件按
+                // `SmsChannelConfig`（通用网关形态，必含 `gateway_url`）解析，而云厂商渠道的
+                // `config_json` 里根本没有 `gateway_url`（只有 `provider`/`endpoint`/凭据），
+                // 于是**阿里云/腾讯云渠道的"测试"按钮永远报"配置无效"**——配置本身是合法的，
+                // 判据用错了形态。现按 `detect_provider_kind` 分流（与 `dispatch` 同一把尺，
+                // 避免出现第三份口径）。
+                let raw_cfg = channel.config_json.as_ref().map(|e| e.0.as_str());
+                let invalid =
+                    || ServiceError::bad_request(&crate::tr!("error.msg.sms_config_invalid"));
+                match crate::service::sms_provider::detect_provider_kind(raw_cfg) {
+                    crate::service::sms_provider::SmsProviderKind::Generic => {
+                        let cfg = crate::service::sms_provider::SmsChannelConfig::from_config_json(
+                            raw_cfg,
+                        )
+                        .map_err(|e| {
+                            tracing::warn!(
+                                "短信渠道 {} 连通性测试：配置无效: {}",
+                                channel.channel_code,
+                                e
+                            );
+                            invalid()
+                        })?;
+                        let provider = crate::service::sms_provider::GenericHttpProvider::new();
+                        provider.probe(&cfg).await.map_err(|e| {
+                            tracing::warn!(
+                                "短信渠道 {} 连通性测试：网关地址不可用: {}",
+                                channel.channel_code,
+                                e
+                            );
+                            ServiceError::bad_request(&format!(
+                                "{}: {e}",
+                                crate::tr!("error.msg.sms_config_invalid")
+                            ))
+                        })
+                    }
+                    kind => {
+                        // 云厂商是模板制签名，"探活"要么真发一条、要么依赖厂商的 dry-run 端点
+                        // （两家都没有统一形态）——刻意不伪造"测试成功"。这里只做与投递同口径的
+                        // 配置校验（含 endpoint 的地址守卫），真实可达性由"测试发送"真投递验证，
+                        // 与 IM 机器人那一支的既定语义一致。
+                        crate::service::sms_provider::CloudSmsConfig::from_config_json(raw_cfg)
+                            .map(|_| ())
+                            .map_err(|e| {
+                                tracing::warn!(
+                                    "短信云渠道 {}（{kind:?}）连通性测试：配置无效: {}",
+                                    channel.channel_code,
+                                    e
+                                );
+                                invalid()
+                            })
+                    }
+                }
             }
             // 批次十八：IM 机器人渠道连通性测试 = 配置解析 fail-closed（webhookUrl 形态/
             // secret 可选）；真实可达性由"测试发送"真投递验证（与 sms probe 同语义）
@@ -1093,10 +1134,22 @@ impl SysMsgService {
     ) -> Result<(), ServiceError> {
         match channel.channel_type.as_str() {
             "email" => {
-                if !self.mailer.is_enabled() {
-                    return Err(ServiceError::bad_request(&crate::tr!(
-                        "error.msg.mail_disabled"
-                    )));
+                // b144：与渠道测试同一三态口径。此前这里 `!is_enabled()` 直接返回
+                // "邮件未启用"的 400，而 SMTP 构建失败时**发送其实从未发生**，
+                // 调用方（报表订阅 / 消息中心）会把它当成"渠道配置问题"而不是服务故障。
+                match self.mailer.availability() {
+                    crate::service::mailer_service::MailAvailability::Ready => {}
+                    crate::service::mailer_service::MailAvailability::Off => {
+                        return Err(ServiceError::bad_request(&crate::tr!(
+                            "error.msg.mail_disabled"
+                        )));
+                    }
+                    crate::service::mailer_service::MailAvailability::Broken => {
+                        return Err(ServiceError::new(
+                            503,
+                            crate::tr!("error.mail.transport_unavailable"),
+                        ));
+                    }
                 }
                 self.mailer.send_text(to_addr, subject, content).await?;
                 Ok(())

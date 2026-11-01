@@ -162,76 +162,81 @@ impl SysRoleFieldPermService {
 
     /// **裁剪判定单一入口**：operator 查看业务表 `table_key` 时应隐藏的字段集合。
     ///
-    /// 判定链（任一不满足 ⇒ 空集合 = 无裁剪 = 关闭态零行为变化）：
+    /// 判定链（任一不满足 ⇒ `Ok(空集合)` = 无裁剪 = 关闭态零行为变化）：
     /// 1. table_key 必须在白名单内（未登记表不裁剪）；
     /// 2. 第一层平台开关必须开启（热加载）；
     /// 3. 第二层套餐能力位（租户操作者）必须可用；
     /// 4. operator 含超管 ⇒ 恒空（管理员不受限）；
     /// 5. operator 全部角色的 hidden 行并集。
     ///
-    /// `operator_user_id = None`：无操作者上下文（内部调用/异常路径），返回空集合
-    /// 并打 warn 日志——裁剪属"收紧可见性"的保护措施，但无上下文时无法判定管理员
-    /// 豁免，保守不裁剪以避免误伤内部链路（与 M1 掩码的 fail-closed 方向相反，
-    /// 因为这里的"误伤"是把数据字段整个抹掉，破坏性大于暴露性）。
+    /// `Err` 只在**判定所依赖的存储读不出来**时发生（角色行 / 矩阵行）。旧实现把这两种
+    /// 失败折成空集合并把日志写成"fail-closed 返回空集合"——**注释与事实相反**：空集合
+    /// 是"什么都不隐藏"，即 fail-**open**，正是这个特性会把管理员设为隐藏的手机号/身份证
+    /// 在一次 DB 抖动里原样发给调用者（本仓第四次抓到"注释与实现相反"，前三次见
+    /// AGENTS 测试门禁 ㉒/㉟ 与台账 b140）。
+    ///
+    /// 为什么改成拒绝**不新增失败面**：判定与紧随其后的列表读的是同一个连接池，
+    /// 存储真故障时那次列表读同样会失败；区别只在于"失败时说了什么"——
+    /// 旧形状说的是"给你看全部"，新形状说的是"这次没读出来"。
+    ///
+    /// `operator_user_id = None` 仍返回 `Ok(空集合)` 并打 warn：那不是存储故障，而是
+    /// 内部调用路径没有操作者上下文（无法判定管理员豁免）；裁剪的"误伤"是把别人的
+    /// 数据字段整个抹掉，破坏性大于暴露性，故这一支保持保守不裁剪。
     pub async fn hidden_fields(
         &self,
         operator_user_id: Option<i64>,
         operator_tid: i64,
         table_key: &str,
-    ) -> HashSet<String> {
+    ) -> Result<HashSet<String>, ServiceError> {
         // 0) 白名单外不裁剪
         if field_perm_whitelist(table_key).is_none() {
-            return HashSet::new();
+            return Ok(HashSet::new());
         }
         let Some(op_uid) = operator_user_id else {
             tracing::warn!(
                 table_key = %table_key,
                 "字段级权限裁剪：无操作者上下文，保守不裁剪（返回空集合）"
             );
-            return HashSet::new();
+            return Ok(HashSet::new());
         };
 
         // 1) 第一层：平台开关（关闭 ⇒ 短路，关闭态零行为变化）
         if !self.platform_enabled().await {
-            return HashSet::new();
+            return Ok(HashSet::new());
         }
         // 2) 第二层：套餐能力位
         if !self.tenant_capable(&self.db, operator_tid).await {
-            return HashSet::new();
+            return Ok(HashSet::new());
         }
         // 3) 管理员豁免：超管（user_id==1 或平台超管角色 = *:*:* 持有来源）恒不受限
-        let roles: Vec<SysRoleModel> = match self.role_repo.find_by_user_id(op_uid).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
+        let roles: Vec<SysRoleModel> =
+            self.role_repo.find_by_user_id(op_uid).await.map_err(|e| {
+                tracing::error!(
                     operator_user_id = op_uid,
-                    "字段级权限裁剪：查询 operator 角色失败，fail-closed 返回空集合: {}",
-                    e
+                    error = %e,
+                    "字段级权限裁剪：查询 operator 角色失败（拒绝响应，不放开隐藏字段）"
                 );
-                return HashSet::new();
-            }
-        };
+                ServiceError::internal(&crate::tr!("error.common.db_failed"))
+            })?;
         if op_uid == SUPER_ADMIN_USER_ID || roles.iter().any(|r| r.is_platform_super_admin()) {
-            return HashSet::new();
+            return Ok(HashSet::new());
         }
         // 4) 第三层：角色授权行并集
         let role_ids: Vec<i64> = roles.iter().map(|r| r.role_id).collect();
-        match self
+        let fields = self
             .perm_repo
             .hidden_fields_by_roles(&role_ids, table_key)
             .await
-        {
-            Ok(fields) => fields.into_iter().collect(),
-            Err(e) => {
-                tracing::warn!(
+            .map_err(|e| {
+                tracing::error!(
                     operator_user_id = op_uid,
                     table_key = %table_key,
-                    "字段级权限裁剪：查询矩阵行失败，fail-closed 返回空集合: {}",
-                    e
+                    error = %e,
+                    "字段级权限裁剪：查询矩阵行失败（拒绝响应，不放开隐藏字段）"
                 );
-                HashSet::new()
-            }
-        }
+                ServiceError::internal(&crate::tr!("error.common.db_failed"))
+            })?;
+        Ok(fields.into_iter().collect())
     }
 
     // ==================== 矩阵读写接口（服务层） ====================
@@ -331,6 +336,74 @@ mod tests {
         apply_field_perm_and_mask, hidden_field_set_to_omit_columns,
     };
     use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, Statement};
+
+    /// b144 A6（形状锁）：`hidden_fields` 的两个存储读点必须**上抛**，不得折成空集合。
+    ///
+    /// 为什么单独钉这一条：判定链上还有四处"合法的空集合"（白名单外 / 无上下文 /
+    /// 平台开关关 / 能力位关），它们与"读不出来"在返回形状上完全相同。把后者折进前者
+    /// 就是让一次 DB 抖动表现得像"这个用户没有被隐藏任何字段"。所以判据钉的是
+    /// **形状**（`Result` + 两处 `map_err` 上抛 + 注释不得再自称 fail-closed），
+    /// 而不是某个用例的输出集合——用例只证一次，形状锁证每一次。
+    #[test]
+    fn hidden_fields_shape_never_folds_storage_failure_into_no_trimming() {
+        use crate::common::prod_scan::{Scan, prod_file};
+        let text = prod_file(
+            "src/service/sys_role_field_perm_service.rs",
+            &Scan::default(),
+        )
+        .text();
+
+        // 1) 判定入口必须是 Result（返回裸集合就没有"读不出来"这一档）
+        assert_eq!(
+            text.matches("-> Result<HashSet<String>, ServiceError> {")
+                .count(),
+            1,
+            "裁剪判定必须返回 Result，且只有这一处该形状"
+        );
+        // 2) 两个存储读点都必须经 map_err 上抛（角色行 / 矩阵行）
+        assert_eq!(
+            text.matches("find_by_user_id(op_uid)").count(),
+            1,
+            "operator 角色读点只能有一处"
+        );
+        assert_eq!(
+            text.matches("hidden_fields_by_roles(&role_ids, table_key)")
+                .count(),
+            1,
+            "矩阵行读点只能有一处"
+        );
+        let raises = text
+            .split("map_err(|e| {")
+            .skip(1)
+            .filter(|w| {
+                w.chars()
+                    .take(400)
+                    .collect::<String>()
+                    .contains("不放开隐藏字段")
+            })
+            .count();
+        assert_eq!(
+            raises, 2,
+            "两处读失败都必须留 error 级痕并上抛，实际 {raises}"
+        );
+
+        // 3) "fail-closed 返回空集合"这句自相矛盾的注释必须绝迹（注释与事实相反是本仓第四次）
+        assert_eq!(
+            text.matches("fail-closed 返回空集合").count(),
+            0,
+            "空集合 = 不裁剪 = fail-open，注释不得再把它写成 fail-closed"
+        );
+
+        // 4) 活性正控：把形状改回缺陷（裸集合 + 折空）必须被 1) 抓到
+        let defective = "pub async fn hidden_fields(&self) -> HashSet<String> { HashSet::new() }";
+        assert_eq!(
+            defective
+                .matches("-> Result<HashSet<String>, ServiceError> {")
+                .count(),
+            0,
+            "探针形状确实不带 Result（否则第 1 条是虚锁）"
+        );
+    }
     use std::sync::Arc;
 
     use crate::entity::sys_role::{ActiveModel as RoleActiveModel, Entity as SysRole};
@@ -455,13 +528,26 @@ mod tests {
 
         // ① 关闭态：hidden 恒空
         assert!(
-            svc.hidden_fields(Some(55), 0, "sys_user").await.is_empty(),
+            svc.hidden_fields(Some(55), 0, "sys_user")
+                .await
+                .unwrap()
+                .is_empty(),
             "关闭态下 hidden_fields 必须恒空（第一层平台开关短路），否则默认部署行为变化"
         );
         // ② 白名单外表恒空（即便开关开启，未登记表也不裁剪）
-        assert!(svc.hidden_fields(Some(55), 0, "sys_dict").await.is_empty());
+        assert!(
+            svc.hidden_fields(Some(55), 0, "sys_dict")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // ③ 无操作者上下文恒空（保守不裁剪）
-        assert!(svc.hidden_fields(None, 0, "sys_user").await.is_empty());
+        assert!(
+            svc.hidden_fields(None, 0, "sys_user")
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // ④ 矩阵读写接口拒绝（明确 i18n 错误）
         let read_err = svc.get_matrix(99, 0, "sys_user").await.unwrap_err();
@@ -563,7 +649,7 @@ mod tests {
         let svc = make_service(&db);
 
         // ① 普通角色：hidden = 矩阵行集合
-        let hidden = svc.hidden_fields(Some(55), 0, "sys_user").await;
+        let hidden = svc.hidden_fields(Some(55), 0, "sys_user").await.unwrap();
         assert_eq!(
             hidden,
             HashSet::from(["phonenumber".to_string()]),
@@ -572,12 +658,18 @@ mod tests {
 
         // ② user_id==1 恒空（管理员不受限）
         assert!(
-            svc.hidden_fields(Some(1), 0, "sys_user").await.is_empty(),
+            svc.hidden_fields(Some(1), 0, "sys_user")
+                .await
+                .unwrap()
+                .is_empty(),
             "超管（user_id==1）必须恒不受限"
         );
         // ③ 平台超管角色持有者恒空（*:*:* 来源）
         assert!(
-            svc.hidden_fields(Some(66), 0, "sys_user").await.is_empty(),
+            svc.hidden_fields(Some(66), 0, "sys_user")
+                .await
+                .unwrap()
+                .is_empty(),
             "平台超管角色持有者必须恒不受限"
         );
 
@@ -616,7 +708,7 @@ mod tests {
         insert_hidden_row(&db, 99, "email").await;
 
         let svc = make_service(&db);
-        let hidden = svc.hidden_fields(Some(88), 0, "sys_user").await;
+        let hidden = svc.hidden_fields(Some(88), 0, "sys_user").await.unwrap();
         assert_eq!(hidden, HashSet::from(["email".to_string()]));
 
         let user_service = {
@@ -658,6 +750,7 @@ mod tests {
         assert!(
             svc.hidden_fields(Some(55), 300, "sys_user")
                 .await
+                .unwrap()
                 .is_empty(),
             "租户能力位 role.field_perm 缺省（off）时必须拦截裁剪"
         );

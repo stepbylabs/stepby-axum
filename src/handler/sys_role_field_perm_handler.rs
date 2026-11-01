@@ -125,7 +125,7 @@ pub async fn get_field_hidden(
             operator.tenant_id(),
             &query.table_key,
         )
-        .await
+        .await?
         .into_iter()
         .collect();
     let mut hidden = hidden;

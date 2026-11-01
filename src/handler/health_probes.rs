@@ -333,19 +333,32 @@ async fn probe_inner(
 }
 
 async fn probe_mail(state: &Arc<AppState>) -> Result<(ProbeStatus, Option<String>), ServiceError> {
-    if !state.mailer_service.is_enabled() {
-        return Ok((
+    // b144：此前只看布尔 `is_enabled()`，于是"邮件已启用但 SMTP 客户端构建失败"
+    // 被报成 SKIPPED（= 可选依赖未配置，中性），而它是一次真实的服务故障：
+    // 报表订阅与消息渠道都在返回 503。SKIPPED 与 DOWN 必须按事实分开。
+    use crate::service::mailer_service::MailAvailability;
+    match state.mailer_service.availability() {
+        MailAvailability::Off => Ok((
             ProbeStatus::Skipped,
-            Some("邮件未启用（mail.enabled=false 或 SMTP 客户端未构建）".to_string()),
-        ));
+            Some("邮件未启用（mail.enabled=false）".to_string()),
+        )),
+        MailAvailability::Broken => Ok((
+            ProbeStatus::Down,
+            Some(
+                "邮件已启用但 SMTP 客户端不可用（host/from_email 缺失或构建失败），发信按失败返回"
+                    .to_string(),
+            ),
+        )),
+        MailAvailability::Ready => {
+            let host = state.config.mail.host.clone();
+            let port = state.config.mail.port;
+            state.mailer_service.probe().await?;
+            Ok((
+                ProbeStatus::Up,
+                Some(format!("SMTP 握手成功（{host}:{port}）")),
+            ))
+        }
     }
-    let host = state.config.mail.host.clone();
-    let port = state.config.mail.port;
-    state.mailer_service.probe().await?;
-    Ok((
-        ProbeStatus::Up,
-        Some(format!("SMTP 握手成功（{host}:{port}）")),
-    ))
 }
 
 async fn probe_ai(state: &Arc<AppState>) -> Result<(ProbeStatus, Option<String>), ServiceError> {

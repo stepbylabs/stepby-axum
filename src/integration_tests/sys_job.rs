@@ -209,3 +209,136 @@ async fn poll_job_logs(ctx: &TestContext) -> Vec<serde_json::Value> {
     }
     last
 }
+
+/// **租户任务不得指向平台专属 invoke_target**（b144，AGENTS 铁律「多租户」）。
+///
+/// 立案：`invoke_target` 是注册表查表调用 ⇒ "租户能填哪个目标"就是"租户能跑哪段代码"。
+/// 改造前所有注册项一视同仁，租户管理员建一条 `cleanup_expired_logs` 的任务并点
+/// 「执行一次」，就会触发**跨租户保留期清理**（删所有租户的
+/// `sys_oper_log` / `sys_logininfor` / `sys_audit_change`，并推进平台标记
+/// `retention:last_success_at`）。
+///
+/// 三条判据方向刻意不同，缺一都会让"闸"退化成"永远拒绝"：
+/// ① 租户 + 平台专属目标 ⇒ 403 且**一行都不落库**；
+/// ② 对照组：平台（tid=0）+ 同一目标 ⇒ 照常成功；
+/// ③ 对照组：租户 + 租户中性目标（`demoTask.*`）⇒ 照常成功（能力没被砍掉）。
+/// 编辑路径同样判，且用**行的归属租户**而不是操作者——平台代管租户行时
+/// 执行侧读的仍是 `job.tenant_id`。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn it_tenant_job_cannot_target_platform_only_task() {
+    use crate::service::sys_job_service::{JobAddDto, JobEditDto, SysJobService};
+
+    let ctx = TestContext::new().await;
+    let svc: &SysJobService = &ctx.state.job_service;
+
+    let add_dto = |name: &str, target: &str| JobAddDto {
+        job_name: name.to_string(),
+        job_group: "DEFAULT".to_string(),
+        invoke_target: target.to_string(),
+        cron_expression: "0 0 4 * * *".to_string(),
+        // status='1' = 暂停：用例不需要它真的被调度执行，只要保存路径受约束
+        misfire_policy: Some("3".to_string()),
+        concurrent: Some("1".to_string()),
+        status: Some("1".to_string()),
+        remark: Some("b144 档位闸用例".to_string()),
+    };
+
+    async fn list_rows(ctx: &TestContext, name: &str) -> Vec<serde_json::Value> {
+        let v = ctx
+            .get_json(&format!("/monitor/job/list?jobName={name}"))
+            .await;
+        v["rows"].as_array().cloned().unwrap_or_default()
+    }
+
+    // ① 租户 + 平台专属目标 ⇒ 403，且不得落库
+    let denied = svc
+        .add_job(
+            add_dto("it_b144_denied", "cleanup_expired_logs"),
+            "tenantadmin",
+            7,
+        )
+        .await
+        .expect_err("租户任务指向平台专属 invoke_target 必须被拒（否则可跨租户删日志）");
+    assert_eq!(denied.code, 403, "实际码值 {}", denied.code);
+    assert!(
+        !denied.message.is_empty() && !denied.message.contains("error."),
+        "必须是可读文案而非裸 i18n 键，实际: {}",
+        denied.message
+    );
+    assert!(
+        denied.message.contains("cleanup_expired_logs"),
+        "拒绝必须点名是哪个目标，否则管理员只能盲猜，实际: {}",
+        denied.message
+    );
+    assert!(
+        list_rows(&ctx, "it_b144_denied").await.is_empty(),
+        "被拒的新增一行都不许落库"
+    );
+
+    // ② 对照组：平台（tid=0）同一目标 ⇒ 照常成功（证明这不是一条"永远拒绝"的闸）
+    let platform_job = svc
+        .add_job(
+            add_dto("it_b144_platform", "cleanup_expired_logs"),
+            "admin",
+            0,
+        )
+        .await
+        .expect("平台任务触发平台专属目标必须放行（对照组）");
+
+    // ③ 对照组：租户 + 租户中性目标 ⇒ 照常成功（示例任务这项既有能力不得消失）
+    let tenant_job = svc
+        .add_job(
+            add_dto("it_b144_tenant_neutral", "demoTask.demoNoParams"),
+            "tenantadmin",
+            7,
+        )
+        .await
+        .expect("租户任务指向租户中性目标必须放行（能力齐备，不得整块砍掉）");
+    assert_eq!(tenant_job.tenant_id, 7, "新行必须归属该租户");
+
+    // ④ 编辑路径：把租户已有的任务改成平台专属目标 ⇒ 403 且存量行一字未改
+    let edit = |job_id: i64, target: &str| JobEditDto {
+        job_id,
+        job_name: "it_b144_tenant_neutral".to_string(),
+        job_group: "DEFAULT".to_string(),
+        invoke_target: target.to_string(),
+        cron_expression: "0 0 4 * * *".to_string(),
+        misfire_policy: Some("3".to_string()),
+        concurrent: Some("1".to_string()),
+        status: Some("1".to_string()),
+        remark: Some("b144 档位闸用例".to_string()),
+    };
+    let edit_err = svc
+        .edit_job(edit(tenant_job.job_id, "cleanup_expired_logs"), "admin", 0)
+        .await
+        // 操作者是平台（tid=0），但**行的归属**是租户 7 ⇒ 仍必须拒：
+        // 执行侧判据取 job.tenant_id，若这里放行就会留下"保存成功、每次执行都失败"的行。
+        .expect_err("平台代管租户行时，档位闸仍按行的归属租户判定");
+    assert_eq!(edit_err.code, 403, "实际码值 {}", edit_err.code);
+    let rows = list_rows(&ctx, "it_b144_tenant_neutral").await;
+    assert_eq!(rows.len(), 1, "存量行必须还在，实际 {rows:?}");
+    assert_eq!(
+        rows[0]["invokeTarget"].as_str(),
+        Some("demoTask.demoNoParams"),
+        "被拒的编辑一字不得写进存量行"
+    );
+
+    // ⑤ 反向对照：同一行改成租户中性目标必须成功（否则 ④ 读成"编辑永远失败"）
+    svc.edit_job(
+        edit(tenant_job.job_id, "demoTask.demoParams('demo')"),
+        "tenantadmin",
+        7,
+    )
+    .await
+    .expect("改成租户中性目标必须放行");
+
+    // 收尾：手工探针必须自带回收（用例造的三行都删掉，避免污染数据面审计）
+    svc.delete_jobs(vec![platform_job.job_id], "admin", 0)
+        .await
+        .expect("回收平台用例任务");
+    svc.delete_jobs(vec![tenant_job.job_id], "tenantadmin", 7)
+        .await
+        .expect("回收租户用例任务");
+    assert!(list_rows(&ctx, "it_b144_platform").await.is_empty());
+    assert!(list_rows(&ctx, "it_b144_tenant_neutral").await.is_empty());
+}

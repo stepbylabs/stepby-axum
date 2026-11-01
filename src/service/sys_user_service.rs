@@ -902,10 +902,12 @@ impl SysUserService {
             let op_user = self.user_repo.base().find_by_id(op_uid).await?;
             let dept_id = op_user.as_ref().and_then(|u| u.dept_id);
             let dept_children = if let Some(d) = dept_id {
-                self.dept_repo
-                    .find_descendant_ids(d)
-                    .await
-                    .unwrap_or_default()
+                // b144 A3：读失败一律上抛，不再折成"空子树"。空子树在
+                // `data_rule_service::build_conditions` 里会让**整条部门维度规则被跳过**
+                // （`current_dept_children.is_empty() ⇒ continue`）——跳过规则 = 不追加
+                // 收窄条件 = 可见面**变宽**。一次 DB 抖动于是把"只能看本部门及以下"
+                // 变成"能看全表"，且没有任何提示（方向与保护相反）。
+                self.dept_repo.find_descendant_ids(d).await?
             } else {
                 vec![]
             };
@@ -1177,10 +1179,12 @@ impl SysUserService {
             let op_user = self.user_repo.base().find_by_id(op_uid).await?;
             let dept_id = op_user.as_ref().and_then(|u| u.dept_id);
             let dept_children = if let Some(d) = dept_id {
-                self.dept_repo
-                    .find_descendant_ids(d)
-                    .await
-                    .unwrap_or_default()
+                // b144 A3：读失败一律上抛，不再折成"空子树"。空子树在
+                // `data_rule_service::build_conditions` 里会让**整条部门维度规则被跳过**
+                // （`current_dept_children.is_empty() ⇒ continue`）——跳过规则 = 不追加
+                // 收窄条件 = 可见面**变宽**。一次 DB 抖动于是把"只能看本部门及以下"
+                // 变成"能看全表"，且没有任何提示（方向与保护相反）。
+                self.dept_repo.find_descendant_ids(d).await?
             } else {
                 vec![]
             };
@@ -3252,6 +3256,59 @@ impl SysUserService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 数据规则上下文里的部门子树读取：返回"没有上抛"的调用点个数。
+    ///
+    /// 判据必须**逐点**查而不是"文件里出现过 `.await?`"——存在一处上抛不能证明另一处也上抛
+    /// （b134 的"存在一次 ≠ 每个入口"）。文本先剔注释行、再把换行压平，
+    /// 于是 rustfmt 怎么折行都不影响结论（⑰"只能判语义不能判字节"）。
+    fn subtree_reads_that_do_not_propagate(text: &str) -> usize {
+        let flat: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .map(|c| if c.is_whitespace() { ' ' } else { c })
+            .collect();
+        let needle = "find_descendant_ids(";
+        let mut bad = 0usize;
+        let mut from = 0usize;
+        while let Some(rel) = flat[from..].find(needle) {
+            let abs = from + rel;
+            let window: String = flat[abs..].chars().take(60).collect();
+            if !window.contains(".await?") {
+                bad += 1;
+            }
+            from = abs + needle.len();
+        }
+        bad
+    }
+
+    /// b144 A3：子树读失败不得折成"空集合"——空集合会让 `build_conditions` 跳过整条
+    /// 部门维度规则（`current_dept_children.is_empty() ⇒ continue`），即**可见面变宽**。
+    #[test]
+    fn data_rule_dept_subtree_reads_propagate_failures() {
+        use crate::common::prod_scan::{Scan, prod_file};
+        let text = prod_file("src/service/sys_user_service.rs", &Scan::default()).text();
+        let sites = text.matches("find_descendant_ids(").count();
+        assert!(
+            sites >= 3,
+            "采集面必须覆盖两处规则上下文 + 一处闸门判定，实际 {sites}"
+        );
+        assert_eq!(
+            subtree_reads_that_do_not_propagate(&text),
+            0,
+            "每一处子树读取都必须上抛（折成空集合 = DB 抖动时放宽数据权限）"
+        );
+
+        // 活性正控：缺陷形状必须被这条判据抓到，否则它是虚锁
+        let defective = "let c = self.dept_repo find_descendant_ids(d) await unwrap_or_default();";
+        assert_eq!(subtree_reads_that_do_not_propagate(defective), 1);
+        // 反证：合规形状不得报
+        let compliant = "let c = self.dept_repo find_descendant_ids(d) .await?;";
+        assert_eq!(subtree_reads_that_do_not_propagate(compliant), 0);
+    }
 
     // ---------- R6-VAL-16 / R6-VAL-17：性别 / 状态归一化 + 枚举校验 ----------
     //

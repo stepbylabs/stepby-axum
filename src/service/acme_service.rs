@@ -114,13 +114,30 @@ pub fn spawn_emit(
                     return;
                 }
             };
-            let client = match reqwest::Client::builder().timeout(timeout).build() {
+            // b144：与领域事件推送同一口径（见 `event_outbox_service::spawn_emit` 的注释）——
+            // 裸构造在无系统信任库的宿主上会让证书需求推送整项失效，而默认跳转策略会把
+            // `X-Stepby-Signature` 带过主机边界。
+            let client = match crate::common::outbound_client::build_delivery_client(
+                "acme",
+                std::time::Duration::from_secs(10),
+                timeout,
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(error = %e, "ACME 推送 HTTP 客户端构建失败");
                     return;
                 }
             };
+            // b144：投递族的 DNS 层守卫（与 `event_outbox_service::spawn_emit` 同一口径）：
+            // `[acme].webhook_url` 由平台写下，但形状与短信网关相同——首跳指向元数据段时
+            // 投递构造点的"不许跨主机"救不了这一次，因为根本没人跳转。尺度只挡
+            // "永不可用段"，内网自建 ACME 接收端照常可用。
+            if let Err(e) = crate::common::ssrf::guard_gateway_url(&url).await {
+                crate::observability::metrics::MetricsRegistry::global()
+                    .record_outbound("acme", "rejected", 0.0);
+                tracing::warn!(error = %e, "ACME 推送目标未过网关守卫（跳过本次推送）");
+                return;
+            }
             // #10 出站熔断：`off`（默认）恒放行；`on` 且目标已打开 ⇒ 本次直接跳过（业务不受影响）
             if !crate::common::breaker::try_acquire(&url) {
                 // 本地闸门挡下 ⇒ 没有出网，按 `rejected` 记（与 `ai/handler` 闸满拒绝同口径）
@@ -133,7 +150,8 @@ pub fn spawn_emit(
                 );
                 return;
             }
-            // b74（AGENTS B.4）：ACME 是外部依赖且本函数有 4 条提前出口，手写计数必漏 ⇒ RAII 守卫
+            // b74（AGENTS B.4）：ACME 是外部依赖且本函数有多条提前出口（序列化失败 / 构造失败 /
+            // 网关守卫 / 熔断拒绝 / 发送失败），手写计数必漏 ⇒ RAII 守卫
             let mut outbound = crate::observability::metrics::OutboundGuard::start("acme");
             let mut req = client
                 .post(&url)

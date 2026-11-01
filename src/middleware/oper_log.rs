@@ -679,6 +679,11 @@ fn is_sensitive_key(key: &str) -> bool {
     lower.contains("phone")
         || lower.contains("mobile")
         || lower.contains("idcard")
+        // b144：本函数上方的注释一直声称覆盖 `id_card`，但 `contains("idcard")`
+        // 对 `id_card`（多一个下划线）**结构上不成立**——蛇形列名是 sea-orm 实体侧的
+        // 线上形状，于是 `{"id_card":"110101199001011234"}` 原样进审计。
+        // 这是"注释与事实相反"的又一例，见台账 b144 取证段。
+        || lower.contains("id_card")
         || lower.contains("idno")
         || lower.contains("email")
         || lower.contains("bankcard")
@@ -690,13 +695,80 @@ fn is_sensitive_key(key: &str) -> bool {
         || lower.contains("nick_name")
         || lower.contains("avatar")
         || lower.contains("token")
-        || lower == "password"
+        // b144：此前是 `lower == "password"` 精确匹配，而改密请求体的键是
+        // `oldPassword` / `newPassword` / `confirmPassword` —— 三个都不是 `password`，
+        // 于是**明文旧密码与新密码原样落进 `sys_oper_log.oper_param`**（实测取证见台账）。
+        // 判据取"名字里带 password/passwd 的就是口令材料"，而不是"恰好叫 password"。
+        // 刻意不放宽 `pwd`：本仓 `pwd_update_time` / `must_change_pwd` 是排障要用的
+        // 时间与标志位，精确匹配即可（C.9"不得误伤排障必需信息"）。
+        || lower.contains("password")
+        || lower.contains("passwd")
         || lower == "pwd"
         || lower == "salt"
-        || lower == "secret"
+        // 同样从精确放宽到包含：`access_key_secret` / `app_secret` / `client_secret`
+        // 都是凭据材料，名字里带 secret 就不是排障字段。
+        || lower.contains("secret")
+        // 短信通用网关的鉴权头值就叫 `auth_value`（`SmsChannelConfig`），
+        // 它既不含 token 也不含 secret，此前完全在名单外。
+        || lower.contains("auth_value")
+        || lower.contains("authvalue")
         || lower.contains("apikey")
         || lower.contains("api_key")
 }
+
+/// 字符串模式（整体不是合法 JSON 时的兜底通道）使用的**精确键名**名单。
+///
+/// 为什么单独一份而不是复用 `is_sensitive_key`：这一路做的是文本替换，需要**字面键名**
+/// 才能拼出 `"k":"` 模式；`contains` 语义在这里没有对应的文本形状。
+/// 两处语义不同但必须覆盖同一批字段，所以由
+/// `flat_list_keys_are_recognized_by_the_other_two` 逐条与另两份名单对账——
+/// 三件事各写一份而无人核对，正是 `oldPassword` 只在兜底名单里出现、
+/// 因而"合法 JSON 的主路径反而不脱敏"的成因（b144 实测）。
+const SENSITIVE_FLAT_KEYS: &[&str] = &[
+    "password",
+    "oldPassword",
+    "newPassword",
+    "confirmPassword",
+    "initPassword",
+    "passwd",
+    "pwd",
+    // b144：与 `is_sensitive_key` / `sanitize_value` 同步补入凭据类键名。
+    // 这份名单只在"整体不是合法 JSON"（超长截断 / form-encoded）时生效，
+    // 而截断恰恰是嵌套 `configJson` 里密钥的漏网路径——三处必须同批扩。
+    "auth_value",
+    "authValue",
+    "access_key_secret",
+    "accessKeySecret",
+    "secretKey",
+    "appSecret",
+    "clientSecret",
+    "token",
+    "accessToken",
+    "refreshToken",
+    "access_token",
+    "phone",
+    "mobile",
+    "phonenumber",
+    "phoneNumber",
+    "idCard",
+    "idcard",
+    "id_card",
+    "email",
+    "bankCard",
+    "bank_card",
+    "cardNumber",
+    "card_number",
+    "idNo",
+    // PII 补漏：昵称 / 头像 URL（非 JSON 请求体的字符串模式匹配需精确大小写变体）
+    "nickName",
+    "nickname",
+    "nick_name",
+    "avatar",
+    "salt",
+    "secret",
+    "apiKey",
+    "api_key",
+];
 
 /// 脱敏请求参数（移除敏感字段值）
 ///
@@ -722,49 +794,34 @@ pub(crate) fn sanitize_param(s: String) -> String {
 
     // 非 JSON（form-encoded 等）：字符串模式脱敏
     let mut result = s;
-    // REGRESS-010：扩展敏感字段列表
-    // P0-33 改进：补充 email/bankCard/idNo/salt/secret/apiKey 等敏感字段
-    let sensitive_fields = [
-        "password",
-        "oldPassword",
-        "newPassword",
-        "confirmPassword",
-        "pwd",
-        "phone",
-        "mobile",
-        "phonenumber",
-        "phoneNumber",
-        "idCard",
-        "idcard",
-        "id_card",
-        "email",
-        "bankCard",
-        "bank_card",
-        "cardNumber",
-        "card_number",
-        "idNo",
-        // PII 补漏：昵称 / 头像 URL（非 JSON 请求体的字符串模式匹配需精确大小写变体）
-        "nickName",
-        "nickname",
-        "nick_name",
-        "avatar",
-        "salt",
-        "secret",
-        "apiKey",
-        "api_key",
-    ];
+    // REGRESS-010 / P0-33：字段名名单见模块级 `SENSITIVE_FLAT_KEYS`（单一事实源，
+    // 由 `flat_list_keys_are_recognized_by_the_other_two` 与另两份名单对账）。
+    let sensitive_fields = SENSITIVE_FLAT_KEYS;
     for field in sensitive_fields {
-        // 匹配 "field":"value" 模式
-        let patterns = [format!("\"{}\":\"", field), format!("\"{}\": \"", field)];
+        // 三种书写形状：`"k":"v"`、`"k": "v"`，以及**嵌套串里的转义形状** `\"k\":\"v\"`。
+        // 第三种是 b144 补的：整体被 `safe_truncate` 截断后 JSON 解析失败，而请求体里的
+        // `configJson` 本身就是"字符串装的 JSON"——不认转义形状就等于内层密钥原样留档。
+        let patterns = [
+            format!("\"{}\":\"", field),
+            format!("\"{}\": \"", field),
+            format!("\\\"{}\\\":\\\"", field),
+        ];
         for pat in &patterns {
-            if let Some(idx) = result.find(pat) {
-                let value_start = idx + pat.len();
-                if let Some(end) = result[value_start..].find('"') {
-                    let value_end = value_start + end;
-                    let before = &result[..value_start];
-                    let after = &result[value_end..];
-                    result = format!("{}***{}", before, after);
-                }
+            // 同名键可能出现多次（批量保存多条渠道 / 多个 DTO 字段）。旧实现用单次
+            // `find` 只替第一处，其余原样落库；这里改成游标推进的循环——
+            // 游标必须前移，否则替换后的 `***` 仍紧跟在 pat 之后，`find` 会命中同一处死循环。
+            let mut from = 0usize;
+            while let Some(rel) = result[from..].find(pat) {
+                let value_start = from + rel + pat.len();
+                let Some(end) = result[value_start..].find('"') else {
+                    break;
+                };
+                result = format!(
+                    "{}***{}",
+                    &result[..value_start],
+                    &result[value_start + end..]
+                );
+                from = value_start + "***".len();
             }
         }
     }
@@ -930,7 +987,9 @@ fn sanitize_value(v: &mut serde_json::Value) {
                 let lower = k.to_lowercase();
                 let need_mask_phone = lower.contains("phone") || lower.contains("mobile");
                 // P0-33 改进：idNo 也走身份证掩码
-                let need_mask_idcard = lower.contains("idcard") || lower.contains("idno");
+                // b144：蛇形 `id_card` 与 `is_sensitive_key` 同步补入（同一漏项两侧都缺）。
+                let need_mask_idcard =
+                    lower.contains("idcard") || lower.contains("id_card") || lower.contains("idno");
                 // P0-33 改进：新增 email 掩码
                 let need_mask_email = lower.contains("email");
                 // P0-33 改进：新增银行卡号掩码
@@ -940,10 +999,15 @@ fn sanitize_value(v: &mut serde_json::Value) {
                     || lower.contains("card_number");
                 // P0-33 改进：salt/secret/apiKey 等同 token 处理（全替换 ***）
                 let need_mask_token = lower.contains("token")
-                    || lower == "password"
+                    // b144：与 `is_sensitive_key` 同步放宽——口令类键是
+                    // `oldPassword` / `newPassword` 这类带前后缀的形状，精确匹配等于没匹配。
+                    || lower.contains("password")
+                    || lower.contains("passwd")
                     || lower == "pwd"
                     || lower == "salt"
-                    || lower == "secret"
+                    || lower.contains("secret")
+                    || lower.contains("auth_value")
+                    || lower.contains("authvalue")
                     || lower.contains("apikey")
                     || lower.contains("api_key")
                     // PII 补漏（本轮）：昵称与头像 URL 同为个人标识，此前遗漏 ⇒ 改昵称的审计
@@ -989,6 +1053,38 @@ fn sanitize_value(v: &mut serde_json::Value) {
         serde_json::Value::Array(arr) => {
             for item in arr.iter_mut() {
                 sanitize_value(item);
+            }
+        }
+        // 「字符串里再装一段 JSON」是本仓多处配置列的既有形状（消息渠道 `configJson`
+        // 内嵌 `auth_value`/`secret`、WebHook `headers`、AI 供应商 `credentials`…）。
+        // 此前这一支是 `_ => {}`，于是内层的密钥/手机号/邮箱**一字不改**地落进
+        // `sys_oper_log.oper_param`——审计面按 C.9 是跨租户可见面，
+        // "字段名不在敏感名单"不等于"值不含敏感信息"，判据必须是"能不能从中读出秘密"。
+        // 只对能解析成对象/数组的串下降：标量串（`"123"`、`"true"`）不动，
+        // 且只有真的脱敏出差异时才重写，避免把历史审计的排版整体改变。
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            let looks_structured = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'));
+            if !looks_structured {
+                return;
+            }
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                return;
+            };
+            if !matches!(
+                parsed,
+                serde_json::Value::Object(_) | serde_json::Value::Array(_)
+            ) {
+                return;
+            }
+            let mut sanitized = parsed.clone();
+            sanitize_value(&mut sanitized);
+            if sanitized == parsed {
+                return;
+            }
+            if let Ok(text) = serde_json::to_string(&sanitized) {
+                *v = serde_json::Value::String(text);
             }
         }
         _ => {}
@@ -1201,6 +1297,129 @@ mod tests {
                 "响应体脱敏名单应覆盖 {key}"
             );
         }
+    }
+
+    /// **三份名单的逐条对账锁**（b144 把"三处各写一份、只核对两处"收成一条）。
+    ///
+    /// 立项证据：`oldPassword` / `newPassword` 此前**只**在扁平兜底名单里出现，
+    /// 而改密请求体是合法 JSON ⇒ 主路径（`sanitize_value`）从不脱敏，
+    /// 实测 `sanitize_param(r#{"oldPassword":"hunter2","newPassword":"brandnew"}#)`
+    /// 原样返回两个明文口令（取证见台账 b144）。
+    /// 方向取"名单必须互相覆盖"而不是"把主路径改成也读扁平名单"：
+    /// 两条通道语义不同（字面键名替换 vs 名字启发），共用一份**判据**而不是共用一份实现。
+    #[test]
+    fn flat_list_keys_are_recognized_by_the_other_two() {
+        for key in SENSITIVE_FLAT_KEYS {
+            assert!(
+                is_sensitive_key(key),
+                "扁平兜底名单里的 {key} 必须同时被 is_sensitive_key 认出，\
+                 否则合法 JSON 主路径会漏脱敏"
+            );
+            // 主路径：整体是合法 JSON
+            let body = format!(r#"{{"{key}":"plaintext-value"}}"#);
+            let out = sanitize_response_body(&body);
+            assert!(!out.contains("plaintext-value"), "主路径必须覆盖 {key}");
+            // 兜底路径：整体不是 JSON（超长截断 / form-encoded）
+            let flat = sanitize_param(format!("prefix-noise {body} suffix"));
+            assert!(!flat.contains("plaintext-value"), "兜底路径必须覆盖 {key}");
+        }
+        // 采集面自证："名单是空的"会让上面三条恒真（⑬ 的同一课）。
+        assert!(
+            SENSITIVE_FLAT_KEYS.len() >= 30,
+            "扁平名单条数异常少（{}），对账可能已空跑",
+            SENSITIVE_FLAT_KEYS.len()
+        );
+    }
+
+    /// 真实改密载荷：口令三键必须全部消失，而非口令字段不得被连带抹掉。
+    #[test]
+    fn password_key_variants_never_reach_the_audit_row() {
+        let param = r#"{"oldPassword":"hunter2","newPassword":"brandnew","confirmPassword":"brandnew","username":"admin","pwd_update_time":"2026-11-01 09:00:00","must_change_pwd":"1"}"#;
+        let out = sanitize_param(param.to_string());
+        for secret in ["hunter2", "brandnew"] {
+            assert!(!out.contains(secret), "口令明文不得进入审计，实际: {out}");
+        }
+        // 对照组（⑮ 的"闸门生效"与"按钮失灵"同形防线）：排障要用的时间与标志位
+        // **不得**被顺手抹掉——C.9 要求同时钉住"不误伤排障必需信息"。
+        assert!(
+            out.contains("2026-11-01 09:00:00"),
+            "pwd_update_time 是排障字段，脱敏不得吞掉它: {out}"
+        );
+        assert!(out.contains("must_change_pwd"), "{out}");
+        assert!(out.contains("admin"), "用户名必须保留: {out}");
+    }
+
+    /// 「字符串里装的 JSON」是本仓多处配置列的既有形状；不下降就是内层密钥原样留档。
+    #[test]
+    fn stringified_json_payloads_are_descended_and_masked() {
+        let inner = r#"{"gateway_url":"http://sms.example.com/send","auth_value":"TOPSECRET","phone_field":"mobile"}"#;
+        let param = format!(
+            r#"{{"channelType":"sms","channelName":"网关A","configJson":{}}}"#,
+            serde_json::to_string(inner).unwrap()
+        );
+        let out = sanitize_param(param);
+        assert!(
+            !out.contains("TOPSECRET"),
+            "configJson 内嵌串的 auth_value 必须被脱敏"
+        );
+        // 内层的非敏感字段仍可读（网关地址是排障必需信息）
+        assert!(
+            out.contains("sms.example.com"),
+            "脱敏不得吞掉网关 URL: {out}"
+        );
+        // 数组里装的串同样下降
+        let arr = format!(
+            r#"{{"items":[{}]}}"#,
+            serde_json::to_string(r#"{"secret":"ARRASECRET"}"#).unwrap()
+        );
+        assert!(!sanitize_param(arr).contains("ARRASECRET"));
+    }
+
+    /// 下降只在"真的脱敏出差异"时重写文本：合法但无敏感信息的串必须逐字节不动。
+    #[test]
+    fn structured_strings_without_secrets_are_left_byte_identical() {
+        let original = r#"{"zField":1,"aField":"keep me"}"#;
+        // 外层 JSON 里这段串是**带转义**的形状；拿原文去 `contains` 比的是两个不同
+        // 编码层，断言必然假红（本轮实测踩过一次，结论错在判据不在产品）。
+        let encoded = serde_json::to_string(original).unwrap();
+        let param = format!(r#"{{"remark":{}}}"#, encoded);
+        let out = sanitize_param(param);
+        assert!(
+            out.contains(&encoded),
+            "无敏感字段时不得重新序列化（键序/空白会变，历史审计对账会误判）：{out}"
+        );
+        // `encoded` 里 zField 排在 aField 之前；serde_json 的 Object 是 BTreeMap，
+        // 一旦被重新解析+序列化必然变成 aField 在前。所以"含 encoded"同时证了键序未动。
+        assert!(
+            out.find("zField").unwrap() < out.find("aField").unwrap(),
+            "{out}"
+        );
+        // 标量串（"123" / "true"）不是结构，绝不下降
+        let scalar = r#"{"code":"123","ok":"true","desc":"{not json}"}"#;
+        let out = sanitize_param(scalar.to_string());
+        assert!(out.contains("123") && out.contains("true"), "{out}");
+    }
+
+    /// 兜底路径的两种漏网形状：同名键多处、以及转义形状（截断后的嵌套串）。
+    #[test]
+    fn flat_mode_covers_repeated_keys_and_escaped_shapes() {
+        // 截断后整体不是合法 JSON ⇒ 走兜底；同名口令出现两次，两处都得替。
+        let broken = r#"{"oldPassword":"AAA","note":"xxxxxxxxxxxxxxxxxxxxxxxxxx"#;
+        let out = sanitize_param(broken.to_string());
+        assert!(!out.contains("AAA"), "首个口令必须被替: {out}");
+
+        let repeated = r#"prefix {"password":"P1","other":"y","password2":"ignored"} suffix"#;
+        let out = sanitize_param(format!("{repeated} ...cut"));
+        assert!(!out.contains("P1"), "{out}");
+
+        // 转义形状：外层已被截断、内层 configJson 仍是 \"key\":\"value\" 形状
+        let escaped =
+            r#"prefix {\"auth_value\":\"INSIDESECRET\",\"x\":1} suffix-and-no-closing-brace"#;
+        let out = sanitize_param(escaped.to_string());
+        assert!(
+            !out.contains("INSIDESECRET"),
+            "转义形状（嵌套串）在兜底路径同样必须脱敏: {out}"
+        );
     }
 
     // C-1 新 P0：safe_truncate 单元测试

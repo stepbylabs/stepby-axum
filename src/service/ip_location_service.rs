@@ -442,10 +442,14 @@ impl IpLocationService {
     async fn download_from_p3terx(&self) -> anyhow::Result<(Vec<u8>, String)> {
         tracing::info!("从 P3TERX 镜像下载 mmdb 文件: {}", P3TERX_URL);
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(IP_DOWNLOAD_TIMEOUT_SECS))
-            .user_agent("stepby-backend/0.1")
-            .build()?;
+        // b144：走 `outbound_client::build_with`（内嵌根证书回落）。裸构造在缺
+        // `ca-certificates` 的宿主上直接返回 Err ⇒ "更新 IP 库"这项能力对自托管用户整块消失，
+        // 而症状只是一句下载失败。label 与出站指标同名，故障面不分裂。
+        let client = crate::common::outbound_client::build_with("ip_geo:p3terx", |b| {
+            b.timeout(std::time::Duration::from_secs(IP_DOWNLOAD_TIMEOUT_SECS))
+                .user_agent("stepby-backend/0.1")
+        })
+        .map_err(anyhow::Error::msg)?;
 
         // b74（AGENTS B.4）：两家镜像是**不同故障面**（P3TERX 为公共镜像、MaxMind 需账号凭据），
         // 分开打标签；本函数有 `?`/`bail!` 多条出口 ⇒ RAII 守卫。
@@ -490,10 +494,12 @@ impl IpLocationService {
             account_id
         );
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(IP_DOWNLOAD_TIMEOUT_SECS))
-            .user_agent("stepby-backend/0.1")
-            .build()?;
+        // b144：同 P3TERX 一支（内嵌根证书回落 + label 与出站指标同名）
+        let client = crate::common::outbound_client::build_with("ip_geo:maxmind", |b| {
+            b.timeout(std::time::Duration::from_secs(IP_DOWNLOAD_TIMEOUT_SECS))
+                .user_agent("stepby-backend/0.1")
+        })
+        .map_err(anyhow::Error::msg)?;
 
         // b74（AGENTS B.4）：MaxMind 与 P3TERX 是不同故障面，各自成桶（见上处注释）。
         // `succeeded()` 打在**取到响应体之后、解压之前**：解压失败是本地格式问题，

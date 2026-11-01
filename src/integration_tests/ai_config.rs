@@ -87,7 +87,7 @@ async fn test_ai_config_mask_never_leaks_plaintext() {
             Some(serde_json::json!({
                 "enabled": true,
                 "provider": "openai",
-                "baseUrl": "https://api.openai.com/v1",
+            "baseUrl": super::AI_PUBLIC_BASE_URL,
                 "apiKey": secret,
                 "model": "gpt-4o-mini",
                 "allowedTables": ["sys_user"]
@@ -126,7 +126,7 @@ async fn test_ai_config_update_hot_reload() {
             Some(serde_json::json!({
                 "enabled": true,
                 "provider": "openai",
-                "baseUrl": "https://api.openai.com/v1",
+            "baseUrl": super::AI_PUBLIC_BASE_URL,
                 "apiKey": "sk-hot-reload-123",
                 "model": "gpt-4o-mini",
                 "allowedTables": ["sys_user", "sys_dept"]
@@ -161,7 +161,7 @@ async fn test_ai_config_rejects_invalid_allowed_table_without_partial_write() {
             Some(serde_json::json!({
                 "enabled": true,
                 "provider": "openai",
-                "baseUrl": "https://api.openai.com/v1",
+            "baseUrl": super::AI_PUBLIC_BASE_URL,
                 "apiKey": "sk-invalid-table",
                 "model": "gpt-4o-mini",
                 "allowedTables": ["sys_user", "sys_user; DROP TABLE sys_user"]
@@ -320,7 +320,7 @@ async fn test_ai_config_across_deployment_modes() {
             Some(serde_json::json!({
                 "enabled": true,
                 "provider": "openai",
-                "baseUrl": "https://api.openai.com/v1",
+            "baseUrl": super::AI_PUBLIC_BASE_URL,
                 "apiKey": "sk-mode-matrix",
                 "model": "gpt-4o-mini",
                 "allowedTables": ["sys_user"]
@@ -384,7 +384,7 @@ async fn test_ai_config_across_deployment_modes() {
             Some(serde_json::json!({
                 "enabled": false,
                 "provider": "openai",
-                "baseUrl": "https://api.openai.com/v1",
+            "baseUrl": super::AI_PUBLIC_BASE_URL,
                 "apiKey": "sk-x",
                 "model": "gpt-4o-mini",
                 "allowedTables": ["sys_user"]

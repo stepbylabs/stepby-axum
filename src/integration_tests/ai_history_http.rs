@@ -227,7 +227,7 @@ async fn test_ai_replay_http_accepts_the_frontend_key() {
             serde_json::json!({
                 "enabled": true,
                 "provider": "openai",
-                "baseUrl": "https://api.openai.com/v1",
+                "baseUrl": super::AI_PUBLIC_BASE_URL,
                 "apiKey": "sk-replay-it",
                 "model": "gpt-4o-mini",
                 "allowedTables": ["sys_user"]
@@ -299,7 +299,7 @@ async fn test_ai_replay_http_rejects_foreign_failed_and_unwhitelisted() {
         serde_json::json!({
             "enabled": true,
             "provider": "openai",
-            "baseUrl": "https://api.openai.com/v1",
+            "baseUrl": super::AI_PUBLIC_BASE_URL,
             "apiKey": "sk-replay-it2",
             "model": "gpt-4o-mini",
             "allowedTables": ["sys_user"]

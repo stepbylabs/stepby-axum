@@ -93,3 +93,103 @@ async fn test_task_chain() {
         "空 id 删除应返回 400，实际: {status}"
     );
 }
+
+/// b144 A5：任务终态是终点——迟到的回调不得把已结束的任务改回 running，
+/// 已成功的事实不得被一条迟到的失败抹掉，已失败的行不得被迟到的成功洗成"这轮跑好了"。
+///
+/// 判据取**库里的行**而不是返回值（返回值可以由同一次读兜出来）；每条断言都对应
+/// 改造前一个真实可达的形状：改造前三者都是无条件整行 `update`，读与写之间没有任何
+/// 约束，两个执行者各自读到未结束态、各自写回，后写的赢。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_task_terminal_states_are_final() {
+    use crate::service::sys_task_service::{SysTaskService, TaskCreateDto};
+
+    let ctx = TestContext::new().await;
+    let svc = SysTaskService::new(ctx.state.db.clone());
+
+    let mk = |name: &str| TaskCreateDto {
+        task_type: "it_task_probe".to_string(),
+        task_name: name.to_string(),
+        total: 10,
+        operator_id: None,
+    };
+
+    // ---------- 分支 1：success 之后，进度回调与失败回调都必须被忽略 ----------
+    let done = svc
+        .create_task(mk("b144-done"), "system", 0, &ctx.state)
+        .await
+        .expect("创建任务应成功");
+    let done_id = done.task_id;
+    svc.complete_task(done_id, Some("ok".to_string()), &ctx.state)
+        .await
+        .expect("完成应成功");
+
+    // 迟到的进度回调：不得把 success 改回 running、不得把 progress 从 100 拉低
+    let after = svc
+        .update_progress(done_id, 1, Some(10), &ctx.state)
+        .await
+        .expect("进度更新应返回行现状（不是错误）");
+    assert_eq!(
+        after.status, "success",
+        "success 不得被改回 running: {after:?}"
+    );
+    assert_eq!(after.progress, 100, "进度不得倒退: {after:?}");
+    assert_eq!(after.current, 10, "current 不得被迟到回调改写: {after:?}");
+
+    // 迟到的失败回调：不得抹掉已完成的事实
+    let after = svc
+        .fail_task(done_id, "late failure".to_string(), &ctx.state)
+        .await
+        .expect("fail 应返回行现状");
+    assert_eq!(after.status, "success", "已成功不得被改成失败: {after:?}");
+
+    // 重复 complete 幂等（同一任务被两个执行者各收尾一次）
+    let again = svc
+        .complete_task(done_id, Some("second".to_string()), &ctx.state)
+        .await
+        .expect("重复 complete 必须幂等成功");
+    assert_eq!(again.status, "success");
+
+    // ---------- 分支 2：failed 之后，成功回调必须被忽略 ----------
+    let bad = svc
+        .create_task(mk("b144-bad"), "system", 0, &ctx.state)
+        .await
+        .expect("创建任务应成功");
+    svc.fail_task(bad.task_id, "boom".to_string(), &ctx.state)
+        .await
+        .expect("fail 应成功");
+    let after = svc
+        .complete_task(bad.task_id, Some("late success".to_string()), &ctx.state)
+        .await
+        .expect("complete 应返回行现状");
+    assert_eq!(
+        after.status, "failed",
+        "已失败不得被迟到的成功洗白: {after:?}"
+    );
+    assert_eq!(
+        after.result_msg.as_deref(),
+        Some("boom"),
+        "失败原因不得被覆盖: {after:?}"
+    );
+
+    // ---------- 分支 3：未结束态照常推进（对照组——证明上面不是"永远拒绝"） ----------
+    let live = svc
+        .create_task(mk("b144-live"), "system", 0, &ctx.state)
+        .await
+        .expect("创建任务应成功");
+    let stepped = svc
+        .update_progress(live.task_id, 4, Some(10), &ctx.state)
+        .await
+        .expect("未结束态应能推进");
+    assert_eq!(
+        stepped.status, "running",
+        "pending→running 应放行: {stepped:?}"
+    );
+    assert_eq!(stepped.progress, 40, "进度应写入: {stepped:?}");
+    let settled = svc
+        .complete_task(live.task_id, None, &ctx.state)
+        .await
+        .expect("对照组：正常链路仍能落终态");
+    assert_eq!(settled.status, "success");
+    assert_eq!(settled.current, 10);
+}

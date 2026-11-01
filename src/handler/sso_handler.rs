@@ -616,12 +616,13 @@ pub async fn client_logo(
         }
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        // 不跟随重定向：重定向可能把请求引到 SSRF 白名单之外的地址
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
+    // b144：走 `outbound_client::build_with`（内嵌根证书回落），"不跟随重定向"这条保持不变——
+    // 重定向可能把请求引到 SSRF 白名单之外的地址。
+    let client = match crate::common::outbound_client::build_with("sso", |b| {
+        b.timeout(std::time::Duration::from_secs(5))
+            // 不跟随重定向：重定向可能把请求引到 SSRF 白名单之外的地址
+            .redirect(reqwest::redirect::Policy::none())
+    }) {
         Ok(c) => c,
         Err(_) => {
             return oidc_error_response(

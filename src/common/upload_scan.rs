@@ -89,14 +89,19 @@ pub async fn scan_bytes(cfg: &UploadScanConfig, filename: &str, bytes: &[u8]) ->
         };
     }
 
-    let client = match reqwest::Client::builder().timeout(cfg.timeout()).build() {
-        Ok(c) => c,
-        Err(e) => {
-            return ScanOutcome::Unavailable {
-                reason: format!("HTTP 客户端构建失败（{e}）"),
-            };
-        }
-    };
+    // b144：走 `outbound_client::build`，取到内嵌根证书回落（裸构造在缺 `ca-certificates`
+    // 的宿主上直接失败 ⇒ 整项病毒扫描被报成"不可用"，而那是宿主缺库、不是扫描端坏了）。
+    // 跳转策略保持默认：扫描端点是**部署期配置**（运维写下），不是租户可改的投递目标，
+    // 投递类那条"不许离开这台主机"的闸只对 DB 里可改的地址成立。
+    let client =
+        match crate::common::outbound_client::build_with("av_scan", |b| b.timeout(cfg.timeout())) {
+            Ok(c) => c,
+            Err(e) => {
+                return ScanOutcome::Unavailable {
+                    reason: format!("HTTP 客户端构建失败（{e}）"),
+                };
+            }
+        };
 
     // 文件名经 URL 编码后放入请求头：避免换行/冒号等造成头注入
     let encoded_name: String = url::form_urlencoded::byte_serialize(filename.as_bytes()).collect();

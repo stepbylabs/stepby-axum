@@ -55,7 +55,12 @@ pub struct OpenAiCompatibleProvider {
     pub api_key: String,
     pub model: String,
     pub timeout_secs: u64,
-    pub client: reqwest::Client,
+    /// 出站客户端；`None` 表示**系统信任库与内嵌根证书两路都建不起来**
+    /// （[`crate::common::outbound_client`] 的终态）。此时每次请求给出可归因的错误，
+    /// 而不是揣着一个必然失败的客户端。
+    pub client: Option<reqwest::Client>,
+    /// `client == None` 的原因原文——"取不到"必须说得出为什么取不到。
+    build_failure: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -97,28 +102,34 @@ struct ChatMessageOut {
 
 impl OpenAiCompatibleProvider {
     pub fn new(base_url: &str, api_key: &str, model: &str, timeout_secs: u64) -> Self {
+        // b144：裸 `Client::builder().build()` 的兜底是 `reqwest::Client::new()`——
+        // 而 `new()` 内部就是 `builder().build().expect(...)`：**兜底路径自己会 panic**，
+        // panic 的场景恰好是它要兜的那一个（宿主缺 `ca-certificates`，批八十一实测形状）。
+        // 现在走 `outbound_client::build_with`：系统信任库失败 ⇒ 内嵌根证书；两路都失败 ⇒
+        // `client = None`，请求期给可归因错误。超时仍**两处都挂**（客户端级 + 每请求级），
+        // 因为原先 `.unwrap_or_default()` 给的是没有任何超时的客户端 ⇒ 上游挂住就整链无限等待
+        // （本仓 fail-closed 取向禁止"取不到就换默认"）。
+        let built = crate::common::outbound_client::build_with("ai", |b| {
+            b.timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
+        });
+        let (client, build_failure) = match built {
+            Ok(c) => (Some(c), None),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    timeout_secs,
+                    "AI provider HTTP 客户端构建失败（系统信任库与内嵌根证书两路都不通），AI 请求将逐次报错"
+                );
+                (None, Some(e))
+            }
+        };
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
             timeout_secs,
-            // 超时**两处都挂**（客户端级 + 每请求级），因为原先这里是
-            // `.build().unwrap_or_default()`：构建失败（TLS/代理环境异常）时
-            // `Default::default()` 给的是一个**没有任何超时**的客户端 ⇒ 上游挂住
-            // 就整条 AI 链路无限等待（本仓 fail-closed 取向禁止"取不到就换默认"）。
-            // 退回默认客户端这件事本身可以接受（请求照样能发），但超时必须是
-            // 结构上存在的——所以补了 `complete_detailed` 里的 `.timeout(...)`。
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
-                .build()
-                .unwrap_or_else(|e| {
-                    tracing::error!(
-                        error = %e,
-                        timeout_secs,
-                        "AI provider HTTP 客户端构建失败，已退回默认客户端并按请求级超时兜底"
-                    );
-                    reqwest::Client::new()
-                }),
+            client,
+            build_failure,
         }
     }
 }
@@ -161,8 +172,15 @@ impl AiProvider for OpenAiCompatibleProvider {
             ],
             temperature: 0.1, // SQL 生成要确定性，压低随机性
         };
-        let resp = self
-            .client
+        // 客户端取不到时**这次请求不得发出**，并把原因说清楚（缺的是哪一路信任库），
+        // 而不是让运维在 provider 侧的报错里猜"是不是密钥/地址写错了"。
+        let client = self.client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "LLM 出站客户端不可用：{}",
+                self.build_failure.as_deref().unwrap_or("未知原因")
+            )
+        })?;
+        let resp = client
             .post(&url)
             // 请求级超时（与客户端级同值，取 max(1) 防"配 0 = 永不超时"的挂死形态）
             .timeout(std::time::Duration::from_secs(self.timeout_secs.max(1)))

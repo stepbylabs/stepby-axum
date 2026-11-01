@@ -93,13 +93,41 @@ pub fn spawn_emit(cfg: EventsConfig, event: &'static str, data: serde_json::Valu
                     return;
                 }
             };
-            let client = match reqwest::Client::builder().timeout(timeout).build() {
+            // b144：改走投递类唯一构造点。原先这里是裸 `reqwest::Client::builder()`，两处代价：
+            // ① 宿主无系统信任库（`debian:*-slim` / distroless）时构造即失败 ⇒ 领域事件推送
+            //    **整项静默失效**（只有这条 WARN），拿不到 `outbound_client` 的内嵌根证书回落
+            //    ——批八十一为 OAuth 修过同一事故，但当时只扫了"会 panic 的构造点"，这一族因
+            //    "失败被吞成 WARN"而躲过了那把锁；
+            // ② reqwest 默认跟随至多 10 次跳转，而它在跨主机跳转时只剥
+            //    `Authorization/Cookie/cookie2/Proxy-Authorization/WWW-Authenticate`
+            //    （`reqwest-0.13.4/src/redirect.rs::remove_sensitive_headers`），
+            //    **`X-Stepby-Signature` 原样带走** ⇒ 接收端一句 `302` 就能把签名头与事件正文
+            //    送到任意主机（含 169.254.169.254）。投递类构造点只在"仍在当初那台主机上"时跟随。
+            let client = match crate::common::outbound_client::build_delivery_client(
+                "outbox",
+                std::time::Duration::from_secs(10),
+                timeout,
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(event, error = %e, "领域事件推送 HTTP 客户端构建失败");
                     return;
                 }
             };
+            // b144：投递族的 DNS 层守卫必须在发送之前（AGENTS 的 B1 判据）。这一族的
+            // `[events].webhook_url` 是**平台配置**，但它和短信网关是同一个形状：
+            // 管理员写下（或被改写成）`http://169.254.169.254/…`，服务端就会带着
+            // `X-Stepby-Signature` 自己去敲云元数据端点。投递类构造点只管住"跳转不许
+            // 离开这台主机"，而**首跳**指向哪由这里判。尺度取"永不可用段"（链路本地/元数据/
+            // 保留域名后缀），不取逐请求那套 RFC1918 黑名单——内网自建接收端是合法部署形态，
+            // 把它挡掉等于砍功能（AGENTS 前端归一判据 2 的同一条：为安全把合法值也挡掉是缺陷）。
+            // 结局与熔断出口同口径：没有出网 ⇒ 记 `rejected` 并留 WARN，业务不受影响。
+            if let Err(e) = crate::common::ssrf::guard_gateway_url(&url).await {
+                crate::observability::metrics::MetricsRegistry::global()
+                    .record_outbound("outbox", "rejected", 0.0);
+                tracing::warn!(event, error = %e, "领域事件推送目标未过网关守卫（跳过本次推送）");
+                return;
+            }
             // #10 出站熔断：`off`（默认）恒放行；`on` 且目标已打开 ⇒ 本次直接跳过（业务不受影响）
             if !crate::common::breaker::try_acquire(&url) {
                 // 本地闸门挡下 ⇒ 没有出网，按 `rejected` 记（与 acme 同口径）
@@ -112,7 +140,8 @@ pub fn spawn_emit(cfg: EventsConfig, event: &'static str, data: serde_json::Valu
                 );
                 return;
             }
-            // b74（AGENTS B.4）：出站结局必须进指标；本函数有 4 条提前出口 ⇒ RAII 守卫
+            // b74（AGENTS B.4）：出站结局必须进指标；本函数有多条提前出口（序列化失败 /
+            // 构造失败 / 网关守卫 / 熔断拒绝 / 发送失败）⇒ RAII 守卫
             let mut outbound = crate::observability::metrics::OutboundGuard::start("outbox");
             let mut req = client
                 .post(&url)

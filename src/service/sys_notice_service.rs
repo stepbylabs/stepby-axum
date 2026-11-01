@@ -505,22 +505,38 @@ impl SysNoticeService {
         if dto.notify_email
             && let Some(st) = state
         {
-            if st.mailer_service.is_enabled() {
-                let mail = self
-                    .render_notice_email(st, &dto.notice_title, safe_content.as_deref())
-                    .await;
-                let host = st.clone();
-                let tenant_id = operator_tid;
-                crate::common::background::spawn_tracked(
-                    "notice_email_dispatch",
-                    NOTICE_EMAIL_BUDGET,
-                    Some(st.observability.metrics.clone()),
-                    async move {
-                        deliver_notice_emails(host, tenant_id, mail).await;
-                    },
-                );
-            } else {
-                tracing::debug!("邮件功能未启用，跳过通知公告邮件发送: {}", dto.notice_title);
+            // b144：`is_enabled()` 为 false 有两种完全相反的原因——"没开邮件"与
+            // "开了但 SMTP 客户端坏了"。前者是合法关闭态（debug 即可，与改造前等价），
+            // 后者必须留 WARN：公告行已提交、收件人永远收不到信，而操作人看到成功。
+            match st.mailer_service.availability() {
+                crate::service::mailer_service::MailAvailability::Ready => {
+                    let mail = self
+                        .render_notice_email(st, &dto.notice_title, safe_content.as_deref())
+                        .await;
+                    let host = st.clone();
+                    let tenant_id = operator_tid;
+                    crate::common::background::spawn_tracked(
+                        "notice_email_dispatch",
+                        NOTICE_EMAIL_BUDGET,
+                        Some(st.observability.metrics.clone()),
+                        async move {
+                            deliver_notice_emails(host, tenant_id, mail).await;
+                        },
+                    );
+                }
+                crate::service::mailer_service::MailAvailability::Off => {
+                    tracing::debug!(
+                        "邮件功能未启用（mail.enabled=false），跳过通知公告邮件发送: {}",
+                        dto.notice_title
+                    );
+                }
+                crate::service::mailer_service::MailAvailability::Broken => {
+                    tracing::warn!(
+                        notice_title = %dto.notice_title,
+                        "邮件已启用但 SMTP 客户端不可用：公告已保存，本批提醒邮件未投递；\
+                         请检查 [mail] 的 host/from_email/port 配置（/health 的 mail 探针会给出原因）"
+                    );
+                }
             }
         }
 

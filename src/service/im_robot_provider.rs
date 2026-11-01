@@ -47,9 +47,10 @@ impl ImRobotConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .ok_or("config_json 缺少 webhookUrl")?;
-        if !webhook_url.starts_with("http://") && !webhook_url.starts_with("https://") {
-            return Err(format!("webhookUrl 必须为 http(s) URL: {webhook_url}"));
-        }
+        // B1：与短信网关同一把尺（scheme / 主机名 / 保留后缀 / 链路本地-元数据段）。
+        // 机器人 webhook 的 URL **本身就带凭据**（`?key=` / `?access_token=`），
+        // 因此这里刻意不回显 URL 本体——这些 Err(String) 会被调用方写进日志（C.9）。
+        crate::common::ssrf::validate_gateway_url_static(&webhook_url)?;
         let secret = v
             .get("secret")
             .and_then(|x| x.as_str())
@@ -149,7 +150,7 @@ impl Default for WeComRobotProvider {
 impl WeComRobotProvider {
     pub fn new() -> Self {
         Self {
-            http: crate::common::outbound_client::build(
+            http: crate::common::outbound_client::build_delivery_client(
                 "im_robot:wecom",
                 std::time::Duration::from_secs(5),
                 std::time::Duration::from_secs(10),
@@ -164,6 +165,9 @@ impl WeComRobotProvider {
 
     /// 投递 text 消息。成功 Ok(())；HTTP 失败 / errcode != 0 均 Err（交由重试链）
     pub async fn send(&self, cfg: &ImRobotConfig, content: &str) -> Result<(), String> {
+        // B1（DNS 层）：webhookUrl 是管理员自由填写的 URL，域名可以解析到链路本地/元数据段，
+        // 而配置解析阶段（同步）只过了静态层。
+        crate::common::ssrf::guard_gateway_url(&cfg.webhook_url).await?;
         let http = http_of(&self.http, "im_robot:wecom")?;
         let resp = http
             .post(&cfg.webhook_url)
@@ -197,7 +201,7 @@ impl Default for DingTalkRobotProvider {
 impl DingTalkRobotProvider {
     pub fn new() -> Self {
         Self {
-            http: crate::common::outbound_client::build(
+            http: crate::common::outbound_client::build_delivery_client(
                 "im_robot:dingtalk",
                 std::time::Duration::from_secs(5),
                 std::time::Duration::from_secs(10),
@@ -222,6 +226,9 @@ impl DingTalkRobotProvider {
             }
             None => cfg.webhook_url.clone(),
         };
+        // B1（DNS 层）：判的是**实际要请求的那个 URL**（加签后的），而不是配置原文——
+        // 加签只加查询参数，主机不变，所以这一句同时覆盖"带 secret"与"不带"两条分支。
+        crate::common::ssrf::guard_gateway_url(&url).await?;
         let http = http_of(&self.http, "im_robot:dingtalk")?;
         let resp = http
             .post(url)

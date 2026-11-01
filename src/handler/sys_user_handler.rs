@@ -33,7 +33,7 @@ use crate::common::constants::MAX_BATCH_DELETE_SIZE;
 use crate::common::excel::{
     CellValue, ExcelColumn, ImportColumn, build_import_template_bytes, export_to_excel,
 };
-use crate::common::{AjaxResult, AppError, TableDataInfo, TreeSelectVo};
+use crate::common::{AjaxResult, AppError, ServiceError, TableDataInfo, TreeSelectVo};
 use crate::entity::sys_post::Model as SysPostModel;
 use crate::entity::sys_role::Model as SysRoleModel;
 use crate::entity::sys_user::Model as SysUserModel;
@@ -109,7 +109,7 @@ pub async fn list(
     let hidden_user_fields = state
         .field_perm_service
         .hidden_fields(Some(operator_user_id), operator.tenant_id(), "sys_user")
-        .await;
+        .await?;
     let (rows, total) = state
         .user_service
         .get_user_page(
@@ -148,7 +148,7 @@ pub async fn export(
     let hidden_user_fields = state
         .field_perm_service
         .hidden_fields(Some(operator_user_id), operator.tenant_id(), "sys_user")
-        .await;
+        .await?;
     let rows = state
         .user_service
         .export_users(
@@ -306,6 +306,41 @@ pub async fn import_template(State(state): State<Arc<AppState>>) -> Result<Respo
     Ok(response)
 }
 
+/// 批量导入的初始口令兜底值（与迁移种子 `sys.user.initPassword` 的播种值一致，
+/// 见 `migration/src/migrations/m20250711_000001_init.rs`）。
+///
+/// 它只在**配置行缺失/为空**时使用——那是"管理员没配"这一合法状态；
+/// 读取本身失败（`Err`）走 `resolve_import_default_password` 的 503 分支。
+pub(crate) const IMPORT_DEFAULT_PASSWORD: &str = "123456";
+
+/// 解析批量导入用的初始口令（b144 A2）。
+///
+/// 三条来源三种结局，改造前 `.ok().flatten()` 把第一条折进了第二条：
+/// - `Ok(Some(非空白))` ⇒ 用配置值（管理员显式设定的初始口令）；
+/// - `Ok(None)` / `Ok(Some(空白))` ⇒ 用 [`IMPORT_DEFAULT_PASSWORD`]**兜底**——"没配"是合法状态；
+/// - `Err` ⇒ **503，导入不执行**——读不出来时拿兜底值当答案，等于把一批用户的口令设成
+///   管理员以为早已改掉的那个：导入结果照常报"成功 N 条"，而通知里写的口令与配置页
+///   显示的不一致，且已经落库、无法由用户自行修复（AGENTS A.1「存储不可用一律
+///   fail-closed」+ C.8 错误契约）。
+///
+/// 判据不是"这算不算严重错误"，而是**失败之后谁能看见什么**：兜底路径静默落库时，
+/// 管理端显示的是配置值、库里是兜底值，两边都"看起来正常"。
+pub(crate) fn resolve_import_default_password(
+    fetched: Result<Option<String>, ServiceError>,
+) -> Result<String, AppError> {
+    match fetched {
+        Ok(Some(v)) if !v.trim().is_empty() => Ok(v),
+        Ok(_) => Ok(IMPORT_DEFAULT_PASSWORD.to_string()),
+        Err(e) => {
+            tracing::warn!(error = %e, "导入初始口令读取失败（fail-closed：不拿兜底值冒充配置）");
+            Err(AppError::new(
+                503,
+                crate::tr!("error.user.import_init_password_unavailable"),
+            ))
+        }
+    }
+}
+
 /// POST /system/user/importData
 /// 上传 xlsx 批量导入用户（multipart 字段名 file）
 ///
@@ -316,6 +351,7 @@ pub async fn import_template(State(state): State<Arc<AppState>>) -> Result<Respo
     responses(
         (status = 200, description = "导入结果（成功数 + 错误回显）", body = AjaxResult<ImportResultVo>),
         (status = 400, description = "文件缺失/格式错误"),
+        (status = 503, description = "初始口令配置读取失败（导入未执行）"),
         (status = 500, description = "服务器错误"),
     ),
     tag = "system-user"
@@ -355,16 +391,14 @@ pub async fn import_data(
         return Err(AppError::bad_request(&crate::tr!("excel.tip_import_xlsx")));
     }
 
-    // 默认初始密码（读系统配置，读取失败回退与迁移种子一致）
-    // 多租户 Phase 3：显式传入操作者租户，租户级覆盖优先于平台默认层
-    let default_password = state
-        .config_service
-        .get_config_value_by_key_cached("sys.user.initPassword", Some(operator.tenant_id()))
-        .await
-        .ok()
-        .flatten()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "123456".to_string());
+    // 默认初始密码（多租户 Phase 3：显式传入操作者租户，租户级覆盖优先于平台默认层）
+    // b144 A2：读失败不再静默回退兜底值——见 `resolve_import_default_password`。
+    let default_password = resolve_import_default_password(
+        state
+            .config_service
+            .get_config_value_by_key_cached("sys.user.initPassword", Some(operator.tenant_id()))
+            .await,
+    )?;
 
     let result = state
         .user_service
@@ -1342,3 +1376,84 @@ crate::impl_into_response!(
     AuthRoleResult,
     AvatarUploadResult
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::prod_scan::{Scan, prod_file};
+
+    /// b144 A2：三条来源三种结局——兜底值只属于"没配"，不属于"读不出来"。
+    #[test]
+    fn import_default_password_distinguishes_absent_from_unreadable() {
+        // 1) 配置值原样采用
+        assert_eq!(
+            resolve_import_default_password(Ok(Some("Passw0rd!".into()))).unwrap(),
+            "Passw0rd!"
+        );
+        // 2) 空白值按"没配"处理（管理员清空输入框 ⇒ 回落兜底，而不是把空格当口令）
+        assert_eq!(
+            resolve_import_default_password(Ok(Some("   ".into()))).unwrap(),
+            IMPORT_DEFAULT_PASSWORD
+        );
+        assert_eq!(
+            resolve_import_default_password(Ok(None)).unwrap(),
+            IMPORT_DEFAULT_PASSWORD
+        );
+        // 3) 读失败 ⇒ 503 且导入不执行（改造前这一支返回兜底值并照常批量落库）
+        let err =
+            resolve_import_default_password(Err(ServiceError::internal("db down"))).unwrap_err();
+        assert_eq!(err.code, 503, "存储故障必须是服务态 503，实际 {}", err.code);
+        assert!(!err.message.is_empty(), "错误响应必须有文案（C.8）");
+        assert!(
+            !err.message.contains("db down"),
+            "内部错误串不得外显给调用方，实际: {}",
+            err.message
+        );
+    }
+
+    /// 兜底常量必须与迁移种子一致——否则"没配"这一合法状态下导入出的口令，与配置页
+    /// 播种显示的值不同（两处事实源必然漂；b134 的"跨仓同一常量必须由判据去读另一侧"）。
+    #[test]
+    fn import_default_password_matches_the_seeded_value() {
+        // migration crate 就在本包目录下（stepby-axum/migration），不是上一级。
+        let migration = std::fs::read_to_string(format!(
+            "{}/migration/src/migrations/m20250711_000001_init.rs",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("迁移文件必须可读（读不到即判据输入坏了，不得当成通过）");
+        let flat: String = migration.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            flat.contains(&format!(
+                "'sys.user.initPassword','{IMPORT_DEFAULT_PASSWORD}'"
+            )),
+            "种子里的初始口令必须等于兜底常量 {IMPORT_DEFAULT_PASSWORD}"
+        );
+    }
+
+    /// 接线反查：导入链上的口令解析必须走单一出口，旧的静默兜底形状必须不存在。
+    #[test]
+    fn import_password_site_goes_through_the_single_resolver() {
+        let text = prod_file("src/handler/sys_user_handler.rs", &Scan::default()).text();
+        assert_eq!(
+            text.matches("resolve_import_default_password(").count(),
+            2,
+            "定义 1 + 调用 1；多处各自解析就会各自漂"
+        );
+        assert_eq!(
+            text.matches(".unwrap_or_else(|| \"123456\"").count(),
+            0,
+            "旧的「读失败也回退兜底」形状必须绝迹"
+        );
+        // 活性正控：缺陷形状确实会被上面两条抓到（否则这是虚锁）
+        let defective =
+            "let p = fetch().await.ok().flatten().unwrap_or_else(|| \"123456\".to_string());";
+        assert_eq!(
+            defective.matches(".unwrap_or_else(|| \"123456\"").count(),
+            1
+        );
+        assert!(
+            !defective.contains("resolve_import_default_password("),
+            "探针形状不得自带合规调用，否则计数器对不上"
+        );
+    }
+}

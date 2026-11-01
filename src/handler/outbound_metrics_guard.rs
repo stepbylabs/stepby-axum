@@ -5,7 +5,10 @@
 //! 多出口函数用 RAII `OutboundGuard`），但**没有任何一把锁能回答"该记的地方都记了吗"**——
 //! 与本轮 §一.7 立案时的原话同构："b72 的指标靠人自觉加"。本锁把它变成可判定的形状：
 //!
-//! 1. 全仓枚举 `reqwest::Client` 的**构造点**（出站能力的物理来源：没有客户端就发不出请求）；
+//! 1. 全仓枚举**出站构造点**——裸 `reqwest::Client` 的构造，以及收口通道
+//!    `common::outbound_client::build{,_with,_delivery_client}` 的调用点
+//!    （出站能力的物理来源：没有客户端就发不出请求；b144 把构造收进唯一通道后，
+//!    通道调用点就是"新出站面"的形状，只认裸形状会让本锁对迁移后的代码全盲）；
 //! 2. 每个构造点必须能在登记表里找到一条**结局**说明，且该说明可机械验证：
 //!    - `ThisFn`：出站就发生在这个函数里，函数体必须含 `OutboundGuard::start("…")` 或
 //!      `record_outbound("…")`；
@@ -57,15 +60,10 @@ mod outbound_metrics_guard_lock {
             "probe_reachability",
             Disposition::Caller("src/handler/health_probes.rs", r#"record_outbound"#),
         ),
-        // 批八十九项 E1：`new()` 现在有**两处**构造——`.builder().build()` 主路径与
-        // `unwrap_or_else` 里的 `Client::new()` 兜底路径（构建失败不再退到"无超时默认客户端"）。
-        // 两条路径的**结局同一个**：请求都由 `complete_detailed` 那一条发送路径发出，
-        // 计数仍由该函数里的 `OutboundGuard::start("ai")` 记，所以重数登记为 2 而不是新增口径。
-        (
-            "src/ai/provider.rs",
-            "new",
-            Disposition::SameFile(r#"OutboundGuard::start("ai")"#),
-        ),
+        // 批八十九项 E1 登记的是两处构造（主路径 + `Client::new()` 兜底路径）；
+        // b144 把兜底路径删掉了——`Client::new()` 内部就是 `builder().build().expect(..)`，
+        // 它在**同一个失败场景**里自己 panic。现在 `new()` 只剩通道调用点一处，
+        // 重数因此回到 1（登记不跟着降 ⇒ 本锁的"登记但已不存在"一支会红，那是它该有的作用）。
         (
             "src/ai/provider.rs",
             "new",
@@ -73,9 +71,9 @@ mod outbound_metrics_guard_lock {
         ),
         // 批八十一：出站客户端构造收进 common::outbound_client（系统信任库缺失时回落内嵌
         // 根证书，构造期绝不 panic——v0.3.0 冒烟在 debian:*-slim 上实测照出的启动期 panic）。
-        // 原先散在 sms_provider/im_robot_provider/sys_oauth_service 的 6 个构造点因此消失，
-        // 结局计数仍留在各自调用方（本锁按"构造点"登记，故这里指向两个真实消费方：
-        // 两处 `Client::builder()` = 主路径 + 回退路径，重数必须与实测一致）。
+        // 通道自身的两处**裸**构造（`build_with` 的主路径与内嵌根回退路径）仍在这里登记：
+        // 它自己没有结局，结局由各消费者记——所以重数 2 指的是这两条物理路径。
+        // 消费者的通道调用点在下面**各自登记**（b144 起通道调用点也是构造点，见 `is_construction`）。
         (
             "src/common/outbound_client.rs",
             "build_with",
@@ -109,6 +107,26 @@ mod outbound_metrics_guard_lock {
             "spawn_emit",
             Disposition::ThisFn(r#"OutboundGuard::start("outbox")"#),
         ),
+        // b144：IM 机器人 provider 走投递类构造点（`Policy::custom` 只跟同主机跳转，
+        // 防"网关 302 到攻击者主机仍带着签名头"）。provider 自己不记结局——
+        // 由 `sys_msg_service` 统一按 `im_robot` 记，在这里再记一次就是双计（B.4）。
+        // 两个 provider（企微 / 钉钉）的 `new()` 同名，重数 2 与实测一致。
+        (
+            "src/service/im_robot_provider.rs",
+            "new",
+            Disposition::Caller(
+                "src/service/sys_msg_service.rs",
+                r#"record_outbound("im_robot""#,
+            ),
+        ),
+        (
+            "src/service/im_robot_provider.rs",
+            "new",
+            Disposition::Caller(
+                "src/service/sys_msg_service.rs",
+                r#"record_outbound("im_robot""#,
+            ),
+        ),
         (
             "src/service/ip_location_service.rs",
             "download_from_p3terx",
@@ -118,6 +136,43 @@ mod outbound_metrics_guard_lock {
             "src/service/ip_location_service.rs",
             "download_from_maxmind",
             Disposition::ThisFn(r#"OutboundGuard::start("ip_geo:maxmind")"#),
+        ),
+        // b144：三家短信 provider 的 `new()` 各有一处投递类构造点（通用 HTTP / 阿里云 / 腾讯云）。
+        // 结局仍由 `sys_msg_service` 按 `sms` 统一记（三家共用一个桶，按渠道 kind 区分不了结局，
+        // 见该文件的注释）——provider 里不重复计数。
+        (
+            "src/service/sms_provider.rs",
+            "new",
+            Disposition::Caller("src/service/sys_msg_service.rs", r#"record_outbound("sms""#),
+        ),
+        (
+            "src/service/sms_provider.rs",
+            "new",
+            Disposition::Caller("src/service/sys_msg_service.rs", r#"record_outbound("sms""#),
+        ),
+        (
+            "src/service/sms_provider.rs",
+            "new",
+            Disposition::Caller("src/service/sys_msg_service.rs", r#"record_outbound("sms""#),
+        ),
+        // HTTP 调试器：客户端在 `new()` 里建，发送在 `execute()`，同文件自有守卫桶
+        (
+            "src/service/sys_http_debug_service.rs",
+            "new",
+            Disposition::SameFile(r#"OutboundGuard::start("http_debug")"#),
+        ),
+        // OAuth 绑定：`new()` 是工厂，两条发送路径各自有桶（oauth_token / oauth_userinfo），
+        // 由 oauth_token_and_userinfo_remain_separate_buckets 单独钉"不得并桶"
+        (
+            "src/service/sys_oauth_service.rs",
+            "new",
+            Disposition::SameFile(r#"OutboundGuard::start("oauth_token")"#),
+        ),
+        // WebHook 投递：`new()` 是工厂，投递与本地闸门拒绝都在同文件记 webhook
+        (
+            "src/service/sys_web_hook_service.rs",
+            "new",
+            Disposition::SameFile(r#""webhook""#),
         ),
         (
             "src/storage/s3.rs",
@@ -154,6 +209,16 @@ mod outbound_metrics_guard_lock {
             || line.contains("reqwest::Client::new(")
             || line.contains("Client::builder(")
             || line.contains("Client::new(")
+            // b144：出站构造收口进 `common::outbound_client` 之后，**裸构造在消费者侧一个都不剩**。
+            // 若仍只认裸形状，本锁会在"全部改走唯一通道"的那一刻把采集面清空 ⇒ 从此对新增出站面
+            // 全盲且照常绿（AGENTS ⑩ 推论"扫描器的目标面必须跟着迁移面走"）。通道的三个入口
+            // 各带 `label`，label 就是故障面桶名，所以**通道的调用点同样是"构造点"**——
+            // 它必须说明结局由谁记，与裸构造同一条纪律。
+            // 只认**限定形态**：通道内部 `build`/`build_delivery_client` 裸调 `build_with(`
+            // 属同一条已登记的构造链，不是新的出站面。
+            || line.contains("outbound_client::build(")
+            || line.contains("outbound_client::build_with(")
+            || line.contains("outbound_client::build_delivery_client(")
     }
 
     /// 一行是否是**函数头**（`fn` 之前只允许可见性与限定词，否则是类型标注之类的 `fn` 出现）
@@ -405,6 +470,44 @@ impl Svc {
                 None,
             ),
             "已守卫的站点必须放行——判它红说明本锁只会制造噪声"
+        );
+    }
+
+    /// b144 采集面迁移的正控：走**唯一通道**的调用点必须被认成构造点。
+    /// 少了这一条，"把所有裸构造改走 outbound_client"这件事会让本锁的采集面清空，
+    /// 而新增的第十个出站面照样无人登记——红的是判据的输入，不是产品。
+    #[test]
+    fn channel_call_site_counts_as_a_construction_site() {
+        let synth = "\
+impl Svc {
+    pub fn new() -> Self {
+        Self { http: crate::common::outbound_client::build_delivery_client(\"synth\", d, t) }
+    }
+}
+";
+        let lines: Vec<String> = synth.lines().map(str::to_string).collect();
+        let idx = lines
+            .iter()
+            .position(|l| is_construction(l))
+            .expect("通道调用点必须被识别为构造点（识别不出来 ⇒ 本锁对迁移后的出站面全盲）");
+        let (name, _) = enclosing_fn(&lines, idx);
+        assert_eq!(name, "new", "通道调用点必须归属到它自己的工厂函数");
+    }
+
+    /// 反方向：通道**内部**裸调 `build_with(` 不构成新出站面（那是同一条已登记构造链的委托）。
+    /// 若这一支被算进采集面，`build`/`build_delivery_client` 会让重数凭空 +2，
+    /// 而修法只能是"再登记两条"——把判据的错误洗成白名单（AGENTS：登记不是消化假信号的手段）。
+    #[test]
+    fn bare_delegate_inside_the_channel_is_not_a_new_site() {
+        assert!(
+            !is_construction(
+                "    build_with(label, |b| b.connect_timeout(connect).timeout(total))"
+            ),
+            "限定形态才是跨模块的出站面；通道内部的裸委托不得计入"
+        );
+        assert!(
+            !is_construction("    build_delivery_client(label, d, t)"),
+            "同上：无模块限定的委托不构成构造点"
         );
     }
 

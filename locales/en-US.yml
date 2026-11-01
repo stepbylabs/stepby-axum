@@ -239,6 +239,7 @@ error:
     email_invalid: Invalid email format
     sex_invalid: Invalid sex value (only 0=male / 1=female / 2=unknown are allowed)
     status_invalid: Invalid user status (only 0=normal / 1=disabled are allowed)
+    import_init_password_unavailable: Failed to read the initial-password setting; the import was not executed, please retry later
     import_login_required: Login name is required
     import_login_length: Login name must be 2-30 characters long
     import_login_format: Login name only allows letters, digits, and underscores
@@ -469,6 +470,7 @@ error:
     platform_type_exists: Dict type conflicts with a platform type and cannot be created by tenants
   job:
     cron_invalid: Invalid cron expression
+    invoke_target_platform_only: 'This invoke target is a platform-only task (%{target}); tenant scheduled jobs must not trigger it. Please run it from the platform console.'
     name_exists: Job name already exists
     group_mismatch: Job group name mismatch
     id_invalid: Invalid job ID
@@ -558,6 +560,7 @@ error:
     to_invalid: Invalid recipient email address
     build_failed: Failed to build email
     smtp_not_initialized: SMTP client not initialized
+    transport_unavailable: Mail service unavailable (SMTP client failed to build); this send was not executed. Please ask an administrator to check the [mail] settings
     send_failed: Failed to send email
     send_timeout: Email send timed out (SMTP unresponsive)
   log:
@@ -786,6 +789,7 @@ msg:
     job_failed: "Task execution failed: %{err}"
     job_duration: "%{msg} (elapsed %{ms}ms)"
     invoke_target_not_found: "Invoke target not found: %{target}"
+    invoke_target_denied: "Rejected: invoke target %{target} is a platform-only task and must not be triggered by tenant jobs"
     job_timeout: "Task execution timeout (>%{secs}s)"
     demoNoParams_success: demoNoParams sample task executed successfully (no business logic, demo only)
     demoParams_success: "demoParams sample task executed successfully, param: %{param} (no business logic, param demo)"

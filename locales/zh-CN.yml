@@ -239,6 +239,7 @@ error:
     email_invalid: 邮箱格式不正确
     sex_invalid: 性别取值非法（仅允许 0=男 / 1=女 / 2=未知）
     status_invalid: 用户状态取值非法（仅允许 0=正常 / 1=停用）
+    import_init_password_unavailable: 初始密码配置读取失败，导入未执行，请稍后重试
     import_login_required: 登录名称不能为空
     import_login_length: 登录名称长度需为 2-30 个字符
     import_login_format: 登录名称仅允许字母、数字、下划线
@@ -469,6 +470,7 @@ error:
     platform_type_exists: 字典类型与平台类型同名，租户不可创建
   job:
     cron_invalid: cron 表达式非法
+    invoke_target_platform_only: 该调用目标属平台专属任务（%{target}），租户的定时任务不得触发，请改用平台管理端执行
     name_exists: 任务名称已存在
     group_mismatch: 任务组名不匹配
     id_invalid: 任务 ID 不合法
@@ -558,6 +560,7 @@ error:
     to_invalid: 收件人邮箱地址无效
     build_failed: 构建邮件失败
     smtp_not_initialized: SMTP 客户端未初始化
+    transport_unavailable: 邮件服务不可用（SMTP 客户端构建失败），本次发送未执行，请联系管理员检查 [mail] 配置
     send_failed: 邮件发送失败
     send_timeout: 邮件发送超时（SMTP 无响应）
   log:
@@ -786,6 +789,7 @@ msg:
     job_failed: "任务执行失败: %{err}"
     job_duration: "%{msg} (耗时 %{ms}ms)"
     invoke_target_not_found: "未找到调用目标: %{target}"
+    invoke_target_denied: "拒绝执行：调用目标 %{target} 属平台专属任务，租户定时任务不得触发"
     job_timeout: "任务执行超时（>%{secs}s）"
     demoNoParams_success: demoNoParams 示例任务执行成功（无业务逻辑，仅演示调度器调用）
     demoParams_success: "demoParams 示例任务执行成功，参数: %{param}（无业务逻辑，仅演示参数传递）"

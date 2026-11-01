@@ -91,6 +91,15 @@ impl From<SchedulerError> for crate::common::error::ServiceError {
 
 // ==================== 调度内核封装 ====================
 
+/// 调度器重同步的结局（只用于日志与管理端提示，不做指标标签——标签基数会随任务数增长）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobReloadSummary {
+    /// 成功从调度器摘掉的旧任务数
+    pub dropped: usize,
+    /// 重同步之后在册的任务数（= 恢复后的库里 `status='0' AND del_flag='0'` 且 cron 合法的那些）
+    pub scheduled: usize,
+}
+
 /// 调度内核封装（不依赖 Web 框架）
 ///
 /// 持有：
@@ -982,6 +991,20 @@ impl JobScheduler {
     /// 多租户：调度器为平台级组件，需覆盖**所有租户**的启用任务，故 tenant_scope 传 None；
     /// 每个 job 自身的 tenant_id 在写 job_log / 任务进度时用于归属。
     pub async fn load_from_db(&self, job_repo: &SysJobRepository) -> Result<(), SchedulerError> {
+        self.load_from_db_with(job_repo, true).await
+    }
+
+    /// 装载的两种语义：`catch_up_misfires` 是否给 `misfire_policy='1'/'2'` 的任务补跑一次。
+    ///
+    /// 拆开是因为**只有启动**才需要补跑：进程停着一段调度窗口 ⇒ 错过的那一次要么补、
+    /// 要么按策略丢弃，那是 misfire 策略的本义。而"备份恢复之后重同步"不是错过窗口，
+    /// 是**换了一个库**——在那儿顺手执行任务，等于把一个回档动作变成写动作
+    /// （且任务本身可能跨租、可能有外部投递副作用）。恢复链因此走 `false` 那一支。
+    async fn load_from_db_with(
+        &self,
+        job_repo: &SysJobRepository,
+        catch_up_misfires: bool,
+    ) -> Result<(), SchedulerError> {
         let jobs = job_repo.find_by_status("0", None).await.map_err(|e| {
             SchedulerError::SchedulerInternal(format!("Failed to load jobs: {}", e))
         })?;
@@ -997,7 +1020,7 @@ impl JobScheduler {
 
                     // misfire_policy='1' 或 '2' 的任务补执行一次
                     let misfire = job.misfire_policy.as_deref().unwrap_or("3");
-                    if misfire == "1" || misfire == "2" {
+                    if catch_up_misfires && (misfire == "1" || misfire == "2") {
                         tracing::info!(
                             "任务 job_id={} misfire_policy={}，启动时补执行一次",
                             job.job_id,
@@ -1018,6 +1041,57 @@ impl JobScheduler {
         }
 
         Ok(())
+    }
+
+    /// 「库里的任务集合整体变了」之后（备份恢复是唯一入口）的调度器重同步。
+    ///
+    /// 为什么必须在这个动作链里做，而不是留给重启：`add_job` 把整行 `SysJobModel` clone 进
+    /// cron 闭包，所以调度器持有的是**注册那一刻的任务快照**。恢复之后三种东西同时错：
+    /// - 备份里已删除/已停用的任务仍按时触发（管理页看不见它，但它照跑）；
+    /// - 备份里被改过 cron 的任务仍按**旧 cron** 触发；
+    /// - 备份里新增的启用任务**永远不**触发。
+    ///
+    /// 三者都是"管理端显示的东西与实际跑的东西分家"（AGENTS C.7 同一族：热改后闸门还是
+    /// 首次建闸值那种行为分裂，只是这一处的面更大——整张任务表）。
+    ///
+    /// 只摘 `running_jobs`（按 DB `job_id` 记账的那一批）：**内置 cron**（保留期清理等）由
+    /// `register_builtin_tasks` 直接注册、不在这张表里，重同步不得动它们；这也是这里逐
+    /// guid `remove` 而不是调任何"清空调度器"API 的原因（那会把内置任务一并带走）。
+    ///
+    /// 尽力而为：单条摘除失败只 WARN 并继续。一次恢复因为某条脏数据整体报"恢复失败"，
+    /// 会诱导运维再点一次恢复——而那才是真正不可逆的动作。
+    pub async fn reload_jobs(
+        &self,
+        job_repo: &SysJobRepository,
+    ) -> Result<JobReloadSummary, SchedulerError> {
+        let stale: Vec<(i64, uuid::Uuid)> = {
+            let running = self.running_jobs.read().await;
+            running.iter().map(|(id, guid)| (*id, *guid)).collect()
+        };
+        let mut dropped = 0usize;
+        for (job_id, guid) in stale {
+            {
+                // 只清自己这一条：期间可能有并发的人工增删（管理页正在改任务）
+                let mut running = self.running_jobs.write().await;
+                if running.get(&job_id) == Some(&guid) {
+                    running.remove(&job_id);
+                }
+            }
+            if let Err(e) = self.scheduler.remove(&guid).await {
+                tracing::warn!(
+                    job_id,
+                    error = %e,
+                    "重同步时摘除旧任务失败（该 guid 可能已不在调度器里），其余任务照常处理"
+                );
+                continue;
+            }
+            dropped += 1;
+        }
+        // 恢复不是"错过调度窗口"，因此不补跑 misfire（见 `load_from_db_with`）
+        self.load_from_db_with(job_repo, false).await?;
+        let scheduled = self.running_jobs.read().await.len();
+        tracing::info!(dropped, scheduled, "定时任务已按恢复后的数据库重同步");
+        Ok(JobReloadSummary { dropped, scheduled })
     }
 
     /// 添加任务到调度器
@@ -1536,7 +1610,7 @@ async fn execute_with_logging(
     // P0-5 加固：catch_unwind 包裹，任务函数 panic 转为业务失败而非中断主流程，
     // 确保后续 finish()（abort 续期 + 释放锁）一定执行。
     let (status, message, exception_info) =
-        match AssertUnwindSafe(execute_inner(&job.invoke_target))
+        match AssertUnwindSafe(execute_inner(&job.invoke_target, job.tenant_id))
             .catch_unwind()
             .await
         {
@@ -1628,12 +1702,30 @@ async fn execute_with_logging(
 /// 执行任务内部函数
 ///
 /// - 从 registry 查表获取任务函数
+/// - **档位闸（b144）**：`job_tid != 0` 时只允许 `TenantNeutral` 目标，否则拒绝执行
 /// - 超时控制：TASK_TIMEOUT_SECS 秒
 ///
 /// R5-TYPE-19：错误类型改为 `Box<dyn Error + Send + Sync>`，支持类型化错误传播。
+///
+/// 为什么闸在这一层而不是只放在创建/编辑处：存量 `sys_job` 行可能指向"当时没闸、
+/// 现在被划为平台专属"的目标；行级租户归属只证明"这行是你的"，不证明"这个动作是你
+/// 能做的"。两处都判，创建侧给早拒（不让任务建成一条永远失败的行），执行侧是最后防线。
+/// 拒绝文案与"未注册"分开，是因为 invoke_target 集合本身在本仓是公开源码，
+/// 不存在"枚举注册名"的泄露面——把它做成同一条消息只会牺牲可诊断性。
 async fn execute_inner(
     invoke_target: &str,
+    job_tid: i64,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if !registry::tenant_may_invoke(job_tid, invoke_target) {
+        tracing::warn!(
+            target = invoke_target,
+            tenant_id = job_tid,
+            "拒绝执行：该 invoke_target 属平台专属，租户拥有的任务不得触发"
+        );
+        return Err(
+            crate::tr!("msg.scheduler.invoke_target_denied", target = invoke_target).into(),
+        );
+    }
     let func = registry::get_task(invoke_target).ok_or_else(|| {
         crate::tr!(
             "msg.scheduler.invoke_target_not_found",
@@ -1968,10 +2060,17 @@ fn register_builtin_tasks(
     // 手动触发入口即下方既有 registry 项 "cleanup_expired_logs"（b54 建立的
     // invoke_target 注册，管理页「执行一次」可达）——批五十九经其清理体抽取
     // （run_cleanup_expired_logs）获得全部七类清理能力，无需重复注册。
+    //
+    // **档位口径（b144）**：`invoke_target` 是查表调用，所以"租户能填哪个 target"
+    // 就是"租户能跑哪段代码"。默认档 `PlatformOnly` 覆盖 `cleanup_expired_logs`
+    // （跨租户删日志 + 推进平台标记）与 `alertEvalTask.run`（逐租户评估规则并派发
+    // 通知，且共用 `alert:evaluate` 资源闸）；三个 `demoTask.*` 是纯日志、不改任何
+    // 状态，故显式登记为 `TenantNeutral`——否则"示例任务"这一既有能力对租户直接消失
+    // （项目定位：不得把能力整块砍掉），而它们砍不掉的那一半是跨租户写路径。
 
     // demoTask.demoNoParams — 无参数示例任务
     // 演示调度器最简调用形式：无参数、返回成功消息
-    registry::register_task(
+    registry::register_tenant_neutral_task(
         "demoTask.demoNoParams",
         Arc::new(|| {
             Box::pin(async {
@@ -1983,7 +2082,7 @@ fn register_builtin_tasks(
 
     // demoTask.demoParams('demo') — 带参数示例任务
     // 演示带字符串参数的任务调用形式
-    registry::register_task(
+    registry::register_tenant_neutral_task(
         "demoTask.demoParams('demo')",
         Arc::new(|| {
             Box::pin(async {
@@ -1998,7 +2097,7 @@ fn register_builtin_tasks(
 
     // demoTask.demoMultipleParams('stepby', true, 2000L, 316.5F, 100) — 多参数示例任务
     // 演示多类型参数（字符串/布尔/长整型/浮点/整型）的任务调用形式
-    registry::register_task(
+    registry::register_tenant_neutral_task(
         "demoTask.demoMultipleParams('stepby', true, 2000L, 316.5F, 100)",
         Arc::new(|| {
             Box::pin(async {
@@ -2146,6 +2245,254 @@ mod tests {
             src.matches("Self::build(").count(),
             2,
             "生产视图必须恰有两条委派点（new / new_without_builtin_crons）"
+        );
+    }
+
+    /// 纯函数：取 `pub async fn NAME(` 的函数体（以下一个顶格方法声明为界）。
+    /// 取不到返回 `None` ⇒ 调用方必须响亮失败，不得把「函数不见了」读成「形状合规」。
+    fn fn_body<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+        let start = src.find(&format!("pub async fn {name}("))?;
+        let rest = &src[start..];
+        let end = [
+            "\n    pub async fn ",
+            "\n    pub fn ",
+            "\n    async fn ",
+            "\n    fn ",
+        ]
+        .iter()
+        .filter_map(|pat| rest[1..].find(pat).map(|i| i + 1))
+        .min()
+        .unwrap_or(rest.len());
+        Some(&rest[..end])
+    }
+
+    /// 空白归一：把函数体压成单空格序列，供形状锚点匹配（排版不参与判定）。
+    fn flatten(body: &str) -> String {
+        body.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// 从函数体里取 `load_from_db_with(job_repo, <flag>)` 的实参 flag（**按参数语义取**，
+    /// 不是按 `", false"` 这段字节匹配）。
+    ///
+    /// 取不到唯一字面量 ⇒ `None`：委派值写成变量、调用出现两次、或整段不见了，都属于
+    /// 「判据的输入坏了」，必须与「形状合规」可区分（AGENTS 前言 ⑰ / 61(e)）。
+    fn catch_up_flag(body: &str) -> Option<bool> {
+        let flat = flatten(body);
+        let needle = "load_from_db_with(";
+        let mut hits = Vec::new();
+        let mut idx = 0usize;
+        while let Some(pos) = flat[idx..].find(needle) {
+            let open = idx + pos + needle.len();
+            let close = flat[open..].find(')')?;
+            let args = &flat[open..open + close];
+            let flag = args.split(',').next_back()?.trim();
+            hits.push(match flag {
+                "true" => true,
+                "false" => false,
+                _ => return None,
+            });
+            idx = open + close;
+        }
+        if hits.len() == 1 { Some(hits[0]) } else { None }
+    }
+
+    /// 重同步函数体的形状判据（纯函数，返回违规清单；空集 = 合规）。
+    ///
+    /// 匹配一律在**空白归一**后的文本上做：锚点若按原始字节匹配，`cargo fmt` 折一次行就会
+    /// 让锁红在排版上而不是代码事实上（AGENTS 前言 ⑰ / 61(e) 同族）。
+    fn reload_jobs_gaps(body: &str) -> Vec<String> {
+        let flat = flatten(body);
+        let mut gaps = Vec::new();
+
+        // ① 只按 guid 逐条摘除。内置 cron（保留期清理 / 启动补跑 / 流程超时扫描）由
+        // `register_builtin_tasks` 直接注册、**不在这张表里**，所以任何「清空调度器」的
+        // 写法都会把它们一并带走——那不是重同步，是把内置任务删了。
+        if !flat.contains("self.scheduler.remove(&guid)") {
+            gaps.push(
+                "必须逐个 guid 调用 self.scheduler.remove(&guid)（不得换成任何整体清理）"
+                    .to_string(),
+            );
+        }
+        for banned in ["shutdown", "remove_all", "clear_all"] {
+            if flat.contains(banned) {
+                gaps.push(format!(
+                    "出现清空调度器的写法 {banned}：内置 cron 不在 running_jobs 里，会被一并带走"
+                ));
+            }
+        }
+        if flat.contains(".clear()") {
+            gaps.push("出现 .clear()：映射整体清空会连并发的人工新增一起抹掉".to_string());
+        }
+
+        // ② 恢复不得补跑 misfire（那是「换了一个库」，不是「错过调度窗口」）。
+        match catch_up_flag(body) {
+            Some(false) => {}
+            Some(true) => gaps.push(
+                "重同步不得补跑 misfire：恢复链顺手执行任务等于把一个回档动作变成写动作\
+                 （任务可能跨租、可能有外部投递副作用）"
+                    .to_string(),
+            ),
+            None => gaps.push(
+                "必须以唯一一次 load_from_db_with(job_repo, false) 收尾（缺失 / 出现多次 / \
+                 委派值不是字面量都算判据输入坏了）"
+                    .to_string(),
+            ),
+        }
+
+        // ③ 摘除映射前必须按 guid 比对（先比对、后摘除）：期间管理页可能正在增删任务。
+        match (
+            flat.find("if running.get(&job_id) == Some(&guid)"),
+            flat.find("running.remove(&job_id)"),
+        ) {
+            (Some(g), Some(r)) if g < r => {}
+            _ => gaps.push(
+                "摘除 running_jobs 前必须先按 guid 比对（无守卫的整体抹除会误清并发的人工新增）"
+                    .to_string(),
+            ),
+        }
+
+        // ④ 尽力而为：单条摘除失败就地留痕并继续，不得把一次恢复变成整体失败。
+        if flat.contains("self.scheduler.remove(&guid).await?") {
+            gaps.push(
+                "摘除失败不得上抛：恢复因某条脏数据整体报「失败」会诱导运维再点一次恢复，\
+                 而那才是不可逆动作"
+                    .to_string(),
+            );
+        } else if !flat.contains("continue") {
+            gaps.push("摘除失败必须 WARN 后继续处理其余任务（不得静默跳过整批）".to_string());
+        }
+
+        gaps
+    }
+
+    /// 备份恢复后的调度器重同步：四条形状约束都由生产函数体本身作证。
+    ///
+    /// 这一族成立的条件是「摘干净 + 装载新库里的一切 + 不动内置任务 + 不执行任务」；任何
+    /// 一条被后来人「顺手优化」掉都会留下静默的行为分裂（管理页显示的和实际跑的不是同一个
+    /// 东西），所以钉在码上而不是注释里（AGENTS ⑮：写了没接线=没写，注释同理）。
+    #[test]
+    fn reload_jobs_shape_lock_is_executed_and_falsifiable() {
+        let src = production_view();
+        let body = fn_body(src, "reload_jobs").expect("reload_jobs 必须在生产码里存在");
+        // 采集面自证：函数体视图不得是空的或被截断（区间取歪时 gaps 会「恒绿」）。
+        assert!(
+            body.contains("load_from_db_with") && body.chars().count() > 400,
+            "重同步函数体视图异常（区间没取到）：长度 {}",
+            body.chars().count()
+        );
+        assert!(
+            reload_jobs_gaps(body).is_empty(),
+            "真实树必须 0 违规，实际：{:?}",
+            reload_jobs_gaps(body)
+        );
+
+        // 对照组：启动装载仍必须补跑 misfire（不得被「统一」成 false——那会砍掉 misfire 策略）。
+        let startup = fn_body(src, "load_from_db").expect("load_from_db 必须在生产码里存在");
+        assert_eq!(
+            catch_up_flag(startup),
+            Some(true),
+            "启动装载必须保持 catch_up_misfires=true"
+        );
+
+        // 尺自身的反脆弱：委派值不是字面量 / 出现两次，都必须取不到而不是"猜一个"。
+        assert_eq!(
+            catch_up_flag("fn a() { self.load_from_db_with(job_repo, flag).await?; }"),
+            None,
+            "非字面量委派值必须判坏（不得猜）"
+        );
+        assert_eq!(
+            catch_up_flag(
+                "fn a() { self.load_from_db_with(job_repo, false).await?; x(); self.load_from_db_with(job_repo, false).await?; }"
+            ),
+            None,
+            "同一个装载调用出现两次必须判坏（无法判定哪一次生效）"
+        );
+        assert_eq!(
+            catch_up_flag("fn a() {}"),
+            None,
+            "没有装载调用必须判坏（不得读成合规）"
+        );
+
+        // 反证（合规不得误报）：排版差异不得改变结论——逗号后无空格仍须放行。
+        let reformatted = body.replace(
+            "load_from_db_with(job_repo, false)",
+            "load_from_db_with(job_repo,false)",
+        );
+        assert!(
+            reload_jobs_gaps(&reformatted).is_empty(),
+            "空格/排版差异不得判成违规（判据不得红在 cargo fmt 上）：{:?}",
+            reload_jobs_gaps(&reformatted)
+        );
+
+        // 正控一：把 guid 换成 job_id（「remove 也接受 job_id 啊」的直觉）⇒ 必须报「逐个 guid」。
+        let guid_lost = reload_jobs_gaps(&body.replace(
+            "self.scheduler.remove(&guid)",
+            "self.scheduler.remove(job_id)",
+        ));
+        assert!(
+            guid_lost.iter().any(|g| g.contains("逐个 guid")),
+            "摘错对象必须点名「必须逐个 guid 摘除」，实际：{:?}",
+            guid_lost
+        );
+
+        // 正控二：加一句「更彻底」的 shutdown ⇒ 必须点名内置 cron 被带走。
+        let with_shutdown = body.replace(
+            "if let Err(e) = self.scheduler.remove(&guid).await",
+            "let _ = self.scheduler.shutdown(true).await; if let Err(e) = self.scheduler.remove(&guid).await",
+        );
+        let gaps = reload_jobs_gaps(&with_shutdown);
+        assert!(
+            gaps.iter().any(|g| g.contains("清空调度器")),
+            "出现 shutdown 必须点名「内置 cron 会被一并带走」，实际：{:?}",
+            gaps
+        );
+
+        // 正控三：恢复链改成补跑 misfire ⇒ 必须报「不得补跑」。
+        let catch_up = body.replace(
+            "load_from_db_with(job_repo, false)",
+            "load_from_db_with(job_repo, true)",
+        );
+        assert!(catch_up != body, "变异锚点必须命中真实函数体");
+        let gaps = reload_jobs_gaps(&catch_up);
+        assert!(
+            gaps.iter().any(|g| g.contains("不得补跑 misfire")),
+            "恢复链改成补跑 misfire 必须报违规，实际：{:?}",
+            gaps
+        );
+        // 反证：只改排版不改语义（无空格）不得被这一条判红——已由上面的 reformatted 断言覆盖，
+        // 这里再单独确认尺本身认得它，否则"恒绿"与"认得出"在两处会漂。
+        assert_eq!(catch_up_flag(&reformatted), Some(false));
+
+        // 正控四：去掉按 guid 比对的守卫 ⇒ 必须报「先比对后摘除」。
+        let no_cas = body.replace("if running.get(&job_id) == Some(&guid) {", "if true {");
+        let gaps = reload_jobs_gaps(&no_cas);
+        assert!(
+            gaps.iter().any(|g| g.contains("按 guid 比对")),
+            "缺少 guid 守卫必须报违规，实际：{:?}",
+            gaps
+        );
+
+        // 正控五：把失败分支上抛 ⇒ 必须报「尽力而为」。
+        let fail_fast = body.replace(
+            "if let Err(e) = self.scheduler.remove(&guid).await",
+            "self.scheduler.remove(&guid).await?; //",
+        );
+        assert!(
+            fail_fast != body,
+            "变异锚点必须命中真实函数体（否则这条正控是虚锁：AGENTS ㉖）"
+        );
+        let gaps = reload_jobs_gaps(&fail_fast);
+        assert!(
+            gaps.iter().any(|g| g.contains("不得上抛")),
+            "摘除失败上抛必须报「尽力而为」违规，实际：{:?}",
+            gaps
+        );
+
+        // 判据自身活性：空函数体不可能合规（否则「把实现整段删掉」也能过）。
+        assert!(
+            reload_jobs_gaps("").len() >= 4,
+            "空体必须报满各条违规（不得返回空集），实际 {}",
+            reload_jobs_gaps("").len()
         );
     }
 
@@ -2408,7 +2755,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_inner_unknown_target_errors() {
-        let err = execute_inner("unitTest.no.such.task").await.unwrap_err();
+        let err = execute_inner("unitTest.no.such.task", 0).await.unwrap_err();
         assert!(!err.to_string().is_empty());
     }
 
@@ -2419,8 +2766,283 @@ mod tests {
             target,
             Arc::new(|| Box::pin(async { Ok("done-ok".to_string()) })),
         );
-        let msg = execute_inner(target).await.unwrap();
+        // tid=0（平台）恒可触发，与档位无关
+        let msg = execute_inner(target, 0).await.unwrap();
         assert_eq!(msg, "done-ok");
+    }
+
+    /// **租户不得触发平台专属任务**（b144 跨租户写路径的收口判据）。
+    ///
+    /// 三条各挡一种退化：① 档位闸生效；② TenantNeutral 仍对租户开放（能力没被砍）；
+    /// ③ 未注册目标按默认档拒绝、且不得被"顺手当租户可用"。
+    #[tokio::test]
+    async fn tenant_jobs_cannot_trigger_platform_only_targets() {
+        let denied_target = "unitTest.scheduler.platform-only";
+        registry::register_task(
+            denied_target,
+            Arc::new(|| Box::pin(async { Ok("should-not-run".to_string()) })),
+        );
+        let err = execute_inner(denied_target, 7)
+            .await
+            .expect_err("租户任务触发平台专属目标必须被拒");
+        assert!(
+            err.to_string().contains(denied_target),
+            "拒绝文案必须点名目标，否则运维无从判断是哪条任务：{err}"
+        );
+        assert!(
+            !err.to_string().contains("should-not-run"),
+            "任务函数一次都不得执行（拒绝必须发生在调用之前，不是执行之后把结果吞掉）"
+        );
+
+        let neutral_target = "unitTest.scheduler.tenant-neutral";
+        registry::register_tenant_neutral_task(
+            neutral_target,
+            Arc::new(|| Box::pin(async { Ok("neutral-ok".to_string()) })),
+        );
+        assert_eq!(
+            execute_inner(neutral_target, 7).await.unwrap(),
+            "neutral-ok",
+            "租户中性任务对租户必须照常可用（不得为了安全砍掉既有能力）"
+        );
+
+        // 未注册 ⇒ 无档位 ⇒ 一律按平台专属处理（fail-closed 方向）
+        assert!(
+            execute_inner("unitTest.never.registered", 7).await.is_err(),
+            "未注册目标对租户不得放行"
+        );
+    }
+
+    /// 真实内置任务的档位必须**由源码形状**证，而不是靠"某个测试先跑过注册"。
+    ///
+    /// 取源码形状锁而非运行时断言的理由：注册表是进程级全局，运行时断言的结论会由
+    /// 测试执行顺序决定（AGENTS 测试门禁 ㉒"绿红由并行度决定"是禁止的形态）。
+    /// 比较一律先折叠空白（`cargo fmt` 会折行，按字节比会红在排版上——㉑(e) 同源）。
+    #[test]
+    fn builtin_task_scopes_are_as_declared_in_source() {
+        let flat = |s: &str| -> String { s.split_whitespace().collect::<Vec<_>>().join("") };
+        let sched = flat(
+            &crate::common::prod_scan::prod_file(
+                "src/scheduler/mod.rs",
+                &crate::common::prod_scan::Scan::default(),
+            )
+            .text(),
+        );
+        let neutral = [
+            "demoTask.demoNoParams",
+            "demoTask.demoParams('demo')",
+            "demoTask.demoMultipleParams('stepby', true, 2000L, 316.5F, 100)",
+        ];
+        for target in neutral {
+            // 两侧同尺：文件折叠过空白，needle 也必须折叠，否则带参数的目标名
+            // （`demoMultipleParams('stepby', true, …)` 里有空格）永远匹配不上
+            // ——这与 AGENTS ⑯(a)"匹配读全文、显示才截断"是同一族，只是这次错在
+            // 归一侧的尺度上（本轮实测首跑就红在这一条）。
+            let quoted = format!("\"{}\"", flat(target));
+            assert!(
+                sched.contains(&format!("registry::register_tenant_neutral_task({quoted}")),
+                "{target} 必须以 TenantNeutral 注册：被划成平台专属等于对租户砍掉示例任务这项既有能力"
+            );
+        }
+        let quoted = "\"cleanup_expired_logs\"";
+        assert!(
+            sched.contains(&format!("registry::register_task({quoted}")),
+            "cleanup_expired_logs 必须走默认档（PlatformOnly）注册"
+        );
+        assert!(
+            !sched.contains(&format!("registry::register_tenant_neutral_task({quoted}")),
+            "cleanup_expired_logs 跨租户删日志并推进平台标记，绝不得被放宽成租户可触发"
+        );
+        // alertEvalTask.run 住在告警服务里，同一条默认档要求
+        let alert = flat(
+            &crate::common::prod_scan::prod_file(
+                "src/service/sys_alert_service.rs",
+                &crate::common::prod_scan::Scan::default(),
+            )
+            .text(),
+        );
+        assert!(
+            alert.contains("registry::register_task(\"alertEvalTask.run\""),
+            "告警评估任务必须走默认档（逐租户评估并派发通知）"
+        );
+
+        // 活性正控：缺陷形状（把 cleanup 改成租户中性）确实会被上面抓住
+        let defective = flat(
+            r#"registry::register_tenant_neutral_task(
+                 "cleanup_expired_logs",
+                 Arc::new(|| Box::pin(async { Ok(String::new()) })),
+             );"#,
+        );
+        assert!(
+            defective.contains("registry::register_tenant_neutral_task(\"cleanup_expired_logs\""),
+            "正控自身失效"
+        );
+    }
+
+    /// 档位与函数必须同一次注册落盘（两张表漂移 ⇒ 判定读到空档位）。
+    #[test]
+    fn registering_a_task_always_records_its_scope() {
+        let target = "unitTest.scope.pairing";
+        registry::register_task(target, Arc::new(|| Box::pin(async { Ok("x".to_string()) })));
+        assert_eq!(
+            registry::task_scope(target),
+            Some(registry::TaskScope::PlatformOnly),
+            "register_task 必须同时写档位（默认最严）"
+        );
+        registry::register_tenant_neutral_task(
+            target,
+            Arc::new(|| Box::pin(async { Ok("y".to_string()) })),
+        );
+        assert_eq!(
+            registry::task_scope(target),
+            Some(registry::TaskScope::TenantNeutral),
+            "覆盖式注册必须连档位一起覆盖（只换函数会留下旧档位）"
+        );
+    }
+
+    /// 生产码里一个函数段的起点（`fn` 头行的行首偏移）。
+    ///
+    /// 只认「行首（允许缩进）+ 可选可见性/`async`/`unsafe` + `fn 名字`」这一形状，
+    /// 与 `outbound_client` 的守卫反查同一把尺：不追求 AST（那要引合成解析器），
+    /// 代价是段边界由"下一个 `fn` 头行"给——本仓分派路径全在这个形状里。
+    fn fn_segment_starts(text: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        for line in text.split_inclusive('\n') {
+            let t = line.trim_start();
+            let head = [
+                "fn ",
+                "pub fn ",
+                "pub(crate) fn ",
+                "async fn ",
+                "pub async fn ",
+                "pub(crate) async fn ",
+                "unsafe fn ",
+            ]
+            .iter()
+            .any(|p| t.starts_with(p));
+            if head {
+                out.push(offset);
+            }
+            offset += line.len();
+        }
+        out
+    }
+
+    /// 该函数的名字（头行里第一个 `fn` 之后的标识符），取不到记 `<unknown>`。
+    fn fn_name_at(text: &str, start: usize) -> String {
+        let rest = &text[start..];
+        let head_line = rest.split('\n').next().unwrap_or("");
+        let after = head_line
+            .split_once("fn ")
+            .map(|x| x.1)
+            .unwrap_or(head_line);
+        let ident: String = after
+            .trim_start_matches([' ', '('])
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if ident.is_empty() {
+            "<unknown>".to_string()
+        } else {
+            ident
+        }
+    }
+
+    /// 纯函数：返回「查表调用了任务函数、但同一个函数段里没有档位闸」的位置。
+    ///
+    /// `get_task(` 的**定义**本身不算分派点（它自己不执行任务）——否则
+    /// `registry.rs` 的 `pub fn get_task(` 会恒被报成缺陷，而把它登记成豁免
+    /// 就等于承认"豁免表可以容纳判据自己的形状"（AGENTS ⑯(c)：为不成立的分支编理由）。
+    fn ungated_dispatch_sites(text: &str, file: &str) -> Vec<String> {
+        let starts = fn_segment_starts(text);
+        let mut out: Vec<String> = Vec::new();
+        let mut from = 0usize;
+        while let Some(rel) = text[from..].find("get_task(") {
+            let at = from + rel;
+            from = at + 1;
+            let seg_start = starts
+                .iter()
+                .rev()
+                .find(|s| **s <= at)
+                .copied()
+                .unwrap_or(0);
+            let seg_end = starts
+                .iter()
+                .find(|s| **s > at)
+                .copied()
+                .unwrap_or(text.len());
+            let name = fn_name_at(text, seg_start);
+            if name == "get_task" {
+                continue;
+            }
+            if !text[seg_start..seg_end].contains("tenant_may_invoke(") {
+                out.push(format!("{file}::{name}"));
+            }
+        }
+        out
+    }
+
+    /// **档位闸必须覆盖每一个分派点**（b144 补）。
+    ///
+    /// 立的案：档位判定写在 `execute_inner` 里，而注册表查表（`registry::get_task`）本身
+    /// 不设防——新增第二条分派路径（「管理端立即执行」直接查表调用、或某个后台任务图省事
+    /// 绕过 `execute_with_logging`）就会**无声绕开**这道跨租户写路径的闸，而本批另外三条用例
+    /// （创建侧 400、编辑侧 400、调度执行被拒）判的都是**自己那条链**，照常全绿。
+    /// 这正是 b134「存在一次 ≠ 每个入口」在档位面上的形状：覆盖面只能由分派点派生。
+    ///
+    /// 三条腿互相顶不了：真实树（0 处未加闸）、活性（分派点确实数得到，且不止一个文件参与扫描）、
+    /// 合成双向（绕闸必抓 / 闸与查表分处两函数也必抓 / 同段加闸不误报 / 定义本身不误报）。
+    #[test]
+    fn every_task_dispatch_site_is_behind_the_scope_gate() {
+        use crate::common::prod_scan::{ProdFile, Scan, prod_files};
+        let files: Vec<ProdFile> = prod_files(&Scan::default());
+        // 采集面自证（⑥「扫不到 ≠ 干净」）：面塌了这条判据就只是"没有输出"
+        assert!(
+            files.len() >= 300,
+            "prod_files 采集面异常（本轮 {} 个文件）⇒ 本判据不作数",
+            files.len()
+        );
+
+        let mut ungated: Vec<String> = Vec::new();
+        let mut dispatches = 0usize;
+        for f in &files {
+            let text = f.text();
+            dispatches += text.matches("get_task(").count();
+            ungated.extend(ungated_dispatch_sites(&text, &f.rel));
+        }
+        assert!(
+            dispatches >= 1,
+            "生产码里一个 get_task 调用点都没数到 ⇒ 判据的输入坏了（采集面/视图口径），不得读成通过"
+        );
+        assert!(
+            ungated.is_empty(),
+            "以下位置查表取任务函数却没过档位闸：{ungated:?}"
+        );
+
+        // 合成双向：缺陷形状必须被抓，合规形状必须不报
+        let defect = "fn dispatch(target: &str) {\n    let f = registry::get_task(target);\n    drop(f);\n}\n";
+        assert_eq!(
+            ungated_dispatch_sites(defect, "x.rs"),
+            vec!["x.rs::dispatch".to_string()],
+            "绕过档位闸的分派点必须点名"
+        );
+        let split = "fn check(t: &str) -> bool {\n    registry::tenant_may_invoke(0, t)\n}\n\
+                     fn dispatch(target: &str) {\n    let f = registry::get_task(target);\n    drop(f);\n}\n";
+        assert_eq!(
+            ungated_dispatch_sites(split, "x.rs"),
+            vec!["x.rs::dispatch".to_string()],
+            "「文件里出现过档位闸」不能证明每个分派点都过了闸（闸必须与查表同段）"
+        );
+        let ok = "async fn execute_inner(t: &str, tid: i64) {\n    if !registry::tenant_may_invoke(tid, t) { return; }\n    let f = registry::get_task(t);\n    drop(f);\n}\n";
+        assert!(
+            ungated_dispatch_sites(ok, "x.rs").is_empty(),
+            "合规形状不得报（否则每轮必红，结局是被放宽）"
+        );
+        let definition = "pub fn get_task(invoke_target: &str) -> Option<TaskFn> {\n    REGISTRY.read().unwrap().get(invoke_target).cloned()\n}\n";
+        assert!(
+            ungated_dispatch_sites(definition, "registry.rs").is_empty(),
+            "get_task 的定义不是分派点"
+        );
     }
 
     // ---------- JobLockGuard（LocalStore） ----------

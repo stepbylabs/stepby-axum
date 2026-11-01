@@ -1337,3 +1337,149 @@ async fn test_msg_retry_pending_fails_orphan_row_without_blocking_batch() {
         "死网关下仍失败、保持待重试（未达上限），实际：{delivered}"
     );
 }
+
+/// b144（B1）：渠道连通性测试必须拒绝"永不可用"的网关地址，同时**照常放行**内网网关。
+///
+/// 两侧都是判据，缺一半都不算证伪：
+/// - 只测"元数据段被拒"，实现可以是"任何地址都拒"——那会把自托管形态砍掉
+///   （AGENTS 项目定位），而集成测试自己用的 `http://127.0.0.1:{port}` 恰好是这一形态；
+/// - 只测"内网被放"，实现可以是"任何地址都放"。
+///
+/// 第二个断面是这一批顺带修掉的形状错配：`test_channel` 的 sms 分支原先无条件按
+/// `SmsChannelConfig`（通用网关形态，必含 `gateway_url`）解析，而云厂商渠道的配置里
+/// 没有那个键 ⇒ **合法配置的阿里云/腾讯云渠道，"测试"按钮永远报"配置无效"**。
+/// 现在按 `detect_provider_kind` 分流（与 `dispatch` 同一把尺），aliyun 合法配置必须 200。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_msg_channel_test_guards_gateway_address_shape() {
+    let ctx = TestContext::new().await;
+    let created = ctx
+        .post_json(
+            "/system/msg/channel",
+            serde_json::json!({
+                "channelName": "it_msg_b144_网关守卫",
+                "channelCode": "it_msg_b144_guard",
+                "channelType": "sms",
+                "status": "0",
+                "configJson": r#"{"gateway_url":"http://127.0.0.1:1/send"}"#
+            }),
+        )
+        .await;
+    ctx.assert_ok(&created);
+    let channel_id = created["data"]["channelId"]
+        .as_i64()
+        .expect("channelId 应为数字");
+
+    /// 写入一种配置形态并跑一次"渠道连通性测试"，返回状态码。
+    /// 走 HTTP 而不是直插库：这一条链的交付形态就是"管理端点一下测试按钮"。
+    async fn step(
+        ctx: &TestContext,
+        channel_id: i64,
+        channel_type: &str,
+        config_json: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let put = ctx
+            .send_raw(raw_req(
+                ctx,
+                Method::PUT,
+                "/system/msg/channel",
+                Some(serde_json::json!({
+                    "channelId": channel_id,
+                    "channelName": "it_msg_b144_网关守卫",
+                    "channelCode": "it_msg_b144_guard",
+                    "channelType": channel_type,
+                    "status": "0",
+                    "configJson": config_json,
+                })),
+            ))
+            .await;
+        assert_eq!(
+            put.0,
+            StatusCode::OK,
+            "写入测试配置本身必须成功（否则后面的断言判的是上一条配置）：{}",
+            put.1
+        );
+        ctx.send_raw(raw_req(
+            ctx,
+            Method::POST,
+            &format!("/system/msg/channel/test/{channel_id}"),
+            Some(serde_json::json!({})),
+        ))
+        .await
+    }
+
+    let cases: [(&str, &str, &str, StatusCode); 8] = [
+        (
+            "generic 内网网关",
+            "sms",
+            r#"{"gateway_url":"http://127.0.0.1:1/send"}"#,
+            StatusCode::OK,
+        ),
+        (
+            "generic 元数据段",
+            "sms",
+            r#"{"gateway_url":"http://169.254.169.254/latest/meta-data/"}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "generic 非 http(s)",
+            "sms",
+            r#"{"gateway_url":"ftp://gw.example.com/send"}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "aliyun 合法配置",
+            "sms",
+            r#"{"provider":"aliyun","endpoint":"https://dysmsapi.aliyuncs.com","access_key_id":"AK","access_key_secret":"SK","sign_name":"签名"}"#,
+            StatusCode::OK,
+        ),
+        (
+            "aliyun endpoint 指向元数据段",
+            "sms",
+            r#"{"provider":"aliyun","endpoint":"http://169.254.169.254","access_key_id":"AK","access_key_secret":"SK","sign_name":"签名"}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "企微内网 webhook",
+            "wecom_robot",
+            r#"{"webhookUrl":"http://127.0.0.1:1/hook"}"#,
+            StatusCode::OK,
+        ),
+        (
+            "企微链路本地 webhook",
+            "wecom_robot",
+            r#"{"webhookUrl":"http://[fe80::1]/hook"}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "钉钉非 http(s) webhook",
+            "dingtalk_robot",
+            r#"{"webhookUrl":"ftp://oapi.dingtalk.com/robot/send","secret":"s"}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+    ];
+    // 具体原因走日志（`tracing::warn!` 带渠道号），对外只给统一的"配置无效"——
+    // 所以判据取状态码这一侧，不把文案当第二判据（那会让 i18n 改动误伤安全断言）。
+    let mut verdicts = Vec::new();
+    for (name, channel_type, config_json, expected) in cases {
+        let (status, body) = step(&ctx, channel_id, channel_type, config_json).await;
+        assert_eq!(
+            status,
+            expected,
+            "『{name}』的渠道连通性测试结局应为 {}，实际 {status}：{body}",
+            expected.as_u16()
+        );
+        verdicts.push((name, status.as_u16()));
+    }
+    // 采集面自证：8 条必须逐条真跑过，且拒绝侧确实出现过（防"循环空转/恒 200"洗成通过）
+    assert_eq!(verdicts.len(), 8, "用例集必须完整执行：{verdicts:?}");
+    assert_eq!(
+        verdicts.iter().filter(|(_, code)| *code == 400).count(),
+        5,
+        "五个坏形状必须都落到 400：{verdicts:?}"
+    );
+    assert_eq!(
+        verdicts.iter().filter(|(_, code)| *code == 200).count(),
+        3,
+        "三个合法形态（含自托管内网网关）必须都放行：{verdicts:?}"
+    );
+}

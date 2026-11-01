@@ -79,13 +79,16 @@ impl S3Backend {
             cfg.public_endpoint.trim_end_matches('/').to_string()
         };
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| {
-                tracing::error!("S3 客户端构建失败: {e}");
-                AppError::internal(&crate::tr!("error.storage.s3_client_build_failed"))
-            })?;
+        // b144：走 `outbound_client::build_with` ⇒ 宿主缺系统信任库时仍有内嵌根证书回落。
+        // 原先裸构造把"宿主没装 ca-certificates"报成"存储坏了"（error.storage.s3_client_build_failed），
+        // 而对象存储的地址是部署期配置、不是租户可改的投递目标，所以跳转策略维持默认。
+        let client = crate::common::outbound_client::build_with("storage:s3", |b| {
+            b.timeout(std::time::Duration::from_secs(30))
+        })
+        .map_err(|e| {
+            tracing::error!("S3 客户端构建失败: {e}");
+            AppError::internal(&crate::tr!("error.storage.s3_client_build_failed"))
+        })?;
 
         Ok(Self {
             client,

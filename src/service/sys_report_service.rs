@@ -1409,6 +1409,64 @@ mod tests {
         assert!(!is_valid_email("no-at-sign"));
     }
 
+    /// 与前端 `src/utils/emailRecipients.ts` **共用同一张用例表**（b144）。
+    ///
+    /// 这张表是跨仓契约，不是"顺手多测几条"：
+    /// - 前端**不得比服务端严**。`ops@mail` / `root@localhost` / `a@123` 是自托管 SMTP
+    ///   与内网域的正常形态，服务端接受，而任何"常见邮箱正则"都会拒 ⇒ 用户的合法配置
+    ///   在本地就被挡住（AGENTS《前端外部输入归一规范》判据 2：为安全把合法值也挡掉同样是缺陷）；
+    /// - 前端**不得比服务端松**，否则 400 仍然要跑一趟网络。
+    ///
+    /// 反向核对由 `stepby-vue/src/utils/emailMirror.guard.test.ts` 执行：它读本文件，
+    /// 要求下表每一条都以**正确的极性**出现在这里——表被单方面改动时那一侧先红。
+    #[test]
+    fn test_is_valid_email_matches_frontend_mirror() {
+        let valid = [
+            "a@example.com",
+            "ops@mail",
+            "root@localhost",
+            "a@b@c",
+            "x@y",
+            "a+b@domain",
+            "a@123",
+            "用户@例え.jp",
+        ];
+        let invalid = [
+            "a b@example.com",
+            "@example.com",
+            "a@",
+            "no-at-sign",
+            "",
+            "   ",
+            "a@b c.com",
+        ];
+        for email in valid {
+            assert!(
+                is_valid_email(email),
+                "服务端必须接受 {email}（前端镜像也必须接受）"
+            );
+        }
+        for email in invalid {
+            assert!(
+                !is_valid_email(email),
+                "服务端必须拒绝 {email}（前端镜像也必须拒绝）"
+            );
+        }
+    }
+
+    /// 拆分语义也必须与前端同表：按 `,` 拆 → 逐段 trim → 丢空段（顺序保持）。
+    #[test]
+    fn test_split_emails_matches_frontend_mirror() {
+        assert_eq!(
+            split_emails(&Some(" a@b.com ,, c@d.com ,".to_string())),
+            vec!["a@b.com".to_string(), "c@d.com".to_string()]
+        );
+        assert_eq!(
+            split_emails(&Some(" , , ".to_string())),
+            Vec::<String>::new()
+        );
+    }
+
     #[test]
     fn test_config_days() {
         assert_eq!(config_days(r#"{"days":30}"#, DEFAULT_STAT_DAYS), 30);

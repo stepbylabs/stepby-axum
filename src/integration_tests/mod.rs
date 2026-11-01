@@ -187,6 +187,18 @@ const REDIS_SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 /// 等待期间打 WARN 的间隔（便于诊断「谁占着槽位」）。
 const REDIS_SLOT_WARN_INTERVAL: Duration = Duration::from_secs(30);
 
+/// AI 集成测试写入的 `base_url`：**公网 IP 字面量，不用主机名**。
+///
+/// 立项（b144 实测）：`AiConfigService::update` 里的 `validate_host_resolution` 会真解析 DNS。
+/// 用 `api.openai.com` 时，这一族用例的绿红由**本机解析器**决定——同一份代码两轮连跑，
+/// 前一轮 1985 全绿、后一轮 5 条红在 `DNS 解析失败：api.openai.com（os error 11001）`，
+/// 之间代码一字未改（AGENTS 测试门禁 ④「判据不得与环境耦合」、㉒「绿红不得由并行度决定」）。
+///
+/// IP 字面量走 `lookup_host` 的本地解析支路（不查 DNS），SSRF 那两层判据照常被跑到：
+/// 静态层 `is_blocked_ip` 放行、解析层回环/内网不命中、写入成功。私网拒绝那一支有自己的
+/// 夹具（`169.254.169.254`），不受本常量影响。
+const AI_PUBLIC_BASE_URL: &str = "https://1.1.1.1/v1";
+
 /// 尝试独占槽位 `i`：打开（或创建）锁文件 `%TEMP%/stepby_it_redis_db_{i}.lock`
 /// 并尝试加跨进程排他文件锁（`std::fs::File::try_lock`，Rust ≥1.89 稳定）。
 /// 加锁成功返回持有锁的 `File`（File 存活即持有锁，close/drop 自动释放）；
