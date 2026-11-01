@@ -461,6 +461,11 @@ pub(crate) async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Res
     }
 
     // 部门父子关系（BFS 求子树；不依赖 ancestors 字段，兼容 NULL/脏数据）
+    //
+    // **读失败一律中止本轮换源，不得 `continue` 剔行**：这一段是"唯一不可逆点"，且入口
+    // 用 `sys_tenant > 0 || 映射 > 0` 判"已完成"——一旦按残缺的 `children` 图跑完，
+    // 漏掉的部门带着旧 `tenant_id` 永久留存，而重启不会再修（改做错一半比不做更坏）。
+    // NULL parent_id（旧模型的根/孤儿行）是**值**不是读失败，仍按原语义跳过。
     let dept_rows = db
         .query_all_raw(Statement::from_string(
             backend,
@@ -470,9 +475,18 @@ pub(crate) async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Res
     let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
     for row in &dept_rows {
         let Ok(id) = row.try_get::<i64>("", "dept_id") else {
-            continue;
+            return Err(anyhow::anyhow!(
+                "Phase 3 换源中止：sys_dept.dept_id 无法按 BIGINT 读出（列类型/affinity 与预期不符），\
+                 继续执行会按残缺的父子图 remap 并永久阻止重试——请先修列形状"
+            ));
         };
-        if let Ok(Some(pid)) = row.try_get::<Option<i64>>("", "parent_id") {
+        let Ok(pid) = row.try_get::<Option<i64>>("", "parent_id") else {
+            return Err(anyhow::anyhow!(
+                "Phase 3 换源中止：sys_dept.parent_id 无法按 BIGINT 读出（dept_id={id}），\
+                 该行会被整棵子树漏在旧租户下且重启不自愈"
+            ));
+        };
+        if let Some(pid) = pid {
             children.entry(pid).or_default().push(id);
         }
     }
@@ -496,8 +510,13 @@ pub(crate) async fn ensure_tenant_phase3(db: &DatabaseConnection) -> anyhow::Res
     let txn = db.begin().await?;
     let mut migrated = 0usize;
     for root in &roots {
+        // 同 BFS：根部门读不出来就 `continue` 会**静默少建一个租户**，而其子树仍带着旧
+        // tenant_id 留在原处，"已完成"判定又阻止重试 ⇒ 与上面同一族，一律中止（txn 未提交即回滚）
         let Ok(root_dept_id) = root.try_get::<i64>("", "dept_id") else {
-            continue;
+            return Err(anyhow::anyhow!(
+                "Phase 3 换源中止：旧模型租户根部门行的 dept_id 无法按 BIGINT 读出，\
+                 跳过会让该根部门对应的租户整族缺失且重启不自愈"
+            ));
         };
         let dept_name = root
             .try_get::<Option<String>>("", "dept_name")
@@ -841,6 +860,64 @@ pub(crate) async fn ensure_tenant_unique_scope(db: &DatabaseConnection) -> anyho
     Ok(())
 }
 
+/// 某租户在「补齐自助按钮授权」里可被发放的范围（**三态**）。
+///
+/// 立的案：改造前这里用 `HashMap<i64, Option<HashSet<i64>>>`，而"这一行没能读出来"与
+/// "该租户的套餐确实不限制"都是 `None`（前者连 key 都不会插入，发放处 `match` 的
+/// `_ => targets.clone()` 把它和后者一起接走）。于是**一次列读取失败就被读成"这个租户
+/// 不受套餐白名单约束"**，把他租白名单之外的菜单也发了下去——AGENTS 铁律「多租户」里
+/// "读侧与写侧必须共用同一租户谓词"的反面形态（这里读侧坏了，写侧按最宽的默认走）。
+///
+/// `Unrestricted` 是**业务语义**（`menu_ids` 为空/NULL = 不限制，口径由
+/// `sys_tenant_service::parse_menu_ids` 单点给出，本类型不复述它）；
+/// `Limited` 是**业务语义**（套餐白名单，可以为空集）；`Unknown` 是**读侧事实**
+/// （`menu_ids` 列取不出来）。`Unrestricted` 与 `Unknown` 的动作刻意相反：
+/// 前者照常全量补齐，后者一个都不补。
+///
+/// 注意 `tenant_id` 本身读不出来的行**不进这张表**（无法归属，连键都没有）——
+/// 它在发放侧表现为 `None`（"该租户不在册"），与 `Unknown` 分别计数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TenantMenuScope {
+    Unrestricted,
+    Limited(std::collections::HashSet<i64>),
+    Unknown,
+}
+
+/// 「这一轮给该角色补哪些菜单」的**裁定结果**（三种结局分开，不折叠成 `Option`）。
+///
+/// 折叠成 `Option<Vec<i64>>` 会把「按套餐一个都不补」（`Limited(∅)`，业务上完全正常）
+/// 与「读侧坏了」（`Unknown` / 租户不在册）混成同一个 `None`：两者动作相同而**归因相反**，
+/// 日志里再也分不出"这个租户确实没解法"和"这次套餐表没读通"。㉔ 那条
+/// 「不可消除的东西至少必须可归因」在返回类型上的形态就是这里。
+#[derive(Debug, PartialEq, Eq)]
+enum ScopeGrant {
+    /// 照范围补：`Unrestricted` = 全量，`Limited` = 交集（可以为空集，那是正常结果）
+    Grant(Vec<i64>),
+    /// 套餐行读出来了，但 `menu_ids` 取不出 ⇒ 读侧坏了，不得当"不限制"全量补
+    SkipUnknownScope,
+    /// `sys_tenant` 里没有这个租户（角色挂在已删/不存在的租户上）⇒ 给他扩权无正当解释
+    SkipMissingTenant,
+}
+
+/// 由租户范围裁定「这一轮给该角色补哪些菜单」。
+///
+/// 抽成纯函数的理由：判据不能靠"跑到那一行去插一条脏数据"，而"少补"与"不补"在日志里
+/// 只差一个计数，必须由测试逐条钉住。
+fn menus_allowed_by_scope(scope: Option<&TenantMenuScope>, targets: &[i64]) -> ScopeGrant {
+    match scope {
+        Some(TenantMenuScope::Unrestricted) => ScopeGrant::Grant(targets.to_vec()),
+        Some(TenantMenuScope::Limited(set)) => ScopeGrant::Grant(
+            targets
+                .iter()
+                .copied()
+                .filter(|id| set.contains(id))
+                .collect(),
+        ),
+        Some(TenantMenuScope::Unknown) => ScopeGrant::SkipUnknownScope,
+        None => ScopeGrant::SkipMissingTenant,
+    }
+}
+
 /// Phase 3.5h 租户角色菜单治理回填（存量库兜底，幂等）：**一剔一补**。
 ///
 /// ① **剔除**平台专属菜单：除能力位已解锁者外，全部平台专属前缀
@@ -1073,27 +1150,48 @@ pub(crate) async fn ensure_tenant_role_menu_governance(
                 .to_string(),
         ))
         .await?;
-    let mut whitelist: std::collections::HashMap<i64, Option<std::collections::HashSet<i64>>> =
+    let mut whitelist: std::collections::HashMap<i64, TenantMenuScope> =
         std::collections::HashMap::new();
+    // 三个"本轮补齐被削弱"的计量分开记：合成一个数就只能说"少补了 3 个"，说不出为什么
+    let mut pkg_rows_unattributable = 0usize;
+    let mut pkg_scope_unknown = 0usize;
     for row in &pkg_rows {
-        let Some(tid) = row.try_get::<i64>("", "tenant_id").ok() else {
+        // tenant_id 取不出来 ⇒ 这一行连"属于哪个租户"都不可知，不进 whitelist
+        // （发放侧按 `None` 走"租户不在册"分支；这里只负责把它数出来）
+        let Ok(tid) = row.try_get::<i64>("", "tenant_id") else {
+            pkg_rows_unattributable += 1;
             continue;
         };
-        let raw = row.try_get::<Option<String>>("", "menu_ids").ok().flatten();
+        // menu_ids 取不出来 ≠ 空/NULL：前者是读侧坏了（Unknown），后者是不限制（业务语义）
+        let Ok(raw) = row.try_get::<Option<String>>("", "menu_ids") else {
+            whitelist.insert(tid, TenantMenuScope::Unknown);
+            pkg_scope_unknown += 1;
+            continue;
+        };
         // 复用服务层解析口径（空/NULL = 不限制），避免两处语义漂移
-        let parsed = crate::service::sys_tenant_service::parse_menu_ids(&raw)
-            .map(|ids| ids.into_iter().collect::<std::collections::HashSet<i64>>());
-        whitelist.insert(tid, parsed);
+        whitelist.insert(
+            tid,
+            match crate::service::sys_tenant_service::parse_menu_ids(&raw) {
+                Some(ids) => TenantMenuScope::Limited(ids.into_iter().collect()),
+                None => TenantMenuScope::Unrestricted,
+            },
+        );
     }
 
     // 4) 现有授权 → 差集插入
     let mut candidates: Vec<(i64, i64)> = Vec::new();
+    // 与上面两量同族：角色行读失败 ⇒ 这个角色连"属于哪个租户"都不知道，本轮不补，
+    // 但必须计数（`.ok()` 折叠成 `None` 会让"读坏了"和"这行本来就不该来"长得一样）
+    let mut roles_unidentifiable = 0usize;
     for row in &role_rows {
-        let role_id = row.try_get::<i64>("", "role_id").ok();
-        let tenant_id = row.try_get::<i64>("", "tenant_id").ok();
-        if let (Some(role_id), Some(tenant_id)) = (role_id, tenant_id) {
-            candidates.push((role_id, tenant_id));
-        }
+        let (Ok(role_id), Ok(tenant_id)) = (
+            row.try_get::<i64>("", "role_id"),
+            row.try_get::<i64>("", "tenant_id"),
+        ) else {
+            roles_unidentifiable += 1;
+            continue;
+        };
+        candidates.push((role_id, tenant_id));
     }
     let role_ph = (1..=candidates.len())
         .map(ph)
@@ -1120,15 +1218,24 @@ pub(crate) async fn ensure_tenant_role_menu_governance(
     }
 
     let mut inserted = 0u64;
+    let mut roles_skipped_unknown_scope = 0usize;
+    let mut roles_skipped_missing_tenant = 0usize;
     for (role_id, tenant_id) in candidates {
-        let allowed = match whitelist.get(&tenant_id) {
-            Some(Some(set)) => targets
-                .iter()
-                .copied()
-                .filter(|id| set.contains(id))
-                .collect::<Vec<i64>>(),
-            // 无套餐限制（或租户行缺失）：全量补齐
-            _ => targets.clone(),
+        let allowed = match menus_allowed_by_scope(whitelist.get(&tenant_id), &targets) {
+            // 读侧不可信 ⇒ 本轮不补（少补可由管理员手工授予或下一轮启动自愈；
+            // 多补是把越权授权写进 sys_role_menu，事后无法归因也无法回滚）
+            ScopeGrant::SkipUnknownScope => {
+                roles_skipped_unknown_scope += 1;
+                continue;
+            }
+            // 角色挂在一个 sys_tenant 里没有的租户上：既无从判定套餐范围，也没有正当的
+            // 扩权理由 ⇒ 不补。与上一种的差别必须在计数上体现（运维该查的东西不同：
+            // 前者查套餐表读取，后者查孤儿角色）
+            ScopeGrant::SkipMissingTenant => {
+                roles_skipped_missing_tenant += 1;
+                continue;
+            }
+            ScopeGrant::Grant(ids) => ids,
         };
         for menu_id in allowed {
             if granted.get(&role_id).is_some_and(|s| s.contains(&menu_id)) {
@@ -1146,6 +1253,27 @@ pub(crate) async fn ensure_tenant_role_menu_governance(
             .await?;
             inserted += 1;
         }
+    }
+    if pkg_rows_unattributable > 0
+        || pkg_scope_unknown > 0
+        || roles_skipped_unknown_scope > 0
+        || roles_skipped_missing_tenant > 0
+        || roles_unidentifiable > 0
+    {
+        // 方向取"少补"，但**不得静默**：这五个量是"本轮补齐动作有没有按白名单约束执行"的唯一出口。
+        // 五个量而不是一个总数，是因为它们指向的排查动作各不相同（行不可归属 / 值不可读 /
+        // 租户不在册 / 角色行不可归属），合成一个数就只剩"少补了 N 个"这句无法行动的话。
+        tracing::warn!(
+            pkg_rows_unattributable,
+            pkg_scope_unknown,
+            roles_skipped_unknown_scope,
+            roles_skipped_missing_tenant,
+            roles_unidentifiable,
+            inserted,
+            "Phase 3.5h 部分租户的套餐范围读不出来 ⇒ 这些角色的自助权限本轮未补齐\
+             （含 sys_tenant 里没有对应行、套餐行无法归属、menu_ids 不可解码三种）；\
+             待套餐行可读后由下一次启动自愈，或由管理员在角色授权页手工授予"
+        );
     }
     tracing::info!(
         inserted,
@@ -1517,3 +1645,193 @@ pub(crate) async fn converge_tenant_grants_on_startup(
 }
 
 use super::*;
+
+#[cfg(test)]
+mod menu_scope_tests {
+    use super::*;
+
+    /// 正常路径不得被本批"少补"的收紧误伤：`Unrestricted`（套餐 menu_ids 为空/NULL）
+    /// 照旧全量补齐，且保持 `targets` 的原有顺序（插库顺序变了会让启动日志与历史轮次对不上）。
+    #[test]
+    fn unrestricted_scope_grants_every_target() {
+        let targets = vec![10_i64, 20, 30];
+        assert_eq!(
+            menus_allowed_by_scope(Some(&TenantMenuScope::Unrestricted), &targets),
+            ScopeGrant::Grant(targets.clone())
+        );
+    }
+
+    /// 有套餐白名单时只补交集 —— 交集之外的 id 一个都不能落库（越权授权的直接来源）。
+    #[test]
+    fn limited_scope_grants_only_the_intersection() {
+        let targets = vec![10_i64, 20, 30];
+        let set: std::collections::HashSet<i64> = [20_i64, 30, 40].into_iter().collect();
+        assert_eq!(
+            menus_allowed_by_scope(Some(&TenantMenuScope::Limited(set)), &targets),
+            ScopeGrant::Grant(vec![20, 30])
+        );
+    }
+
+    /// **本批立案点的反面**：空套餐白名单是业务结果（该套餐一个自助按钮都不给），
+    /// 必须走 `Grant(空)`——它和 `SkipUnknownScope` 的**动作**相同（都不写库），
+    /// **语义相反**（一个"按套餐确实没有"，一个"这次没读通"）。
+    /// 折叠成 `Option<Vec<i64>>` 时两者都是 `None`，日志里再也分不出来。
+    #[test]
+    fn empty_limited_scope_is_a_grant_of_nothing_not_a_skip() {
+        let targets = vec![10_i64, 20];
+        let empty: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        assert_eq!(
+            menus_allowed_by_scope(Some(&TenantMenuScope::Limited(empty)), &targets),
+            ScopeGrant::Grant(Vec::new())
+        );
+    }
+
+    /// **本批立案点**：`menu_ids` 读不出来时，改造前会走到 `_ => targets.clone()`
+    /// 那条分支（"无套餐限制"），把他租白名单之外的菜单发下去。
+    /// 现在必须走 `SkipUnknownScope`——宁可少补（可由管理员手工授予/下次启动自愈），
+    /// 不可多补（越权行一旦写进 sys_role_menu，事后既无法归因也无法回滚）。
+    #[test]
+    fn unknown_scope_must_not_fall_back_to_full_grant() {
+        let targets = vec![10_i64, 20, 30];
+        assert_eq!(
+            menus_allowed_by_scope(Some(&TenantMenuScope::Unknown), &targets),
+            ScopeGrant::SkipUnknownScope
+        );
+        assert_ne!(
+            menus_allowed_by_scope(Some(&TenantMenuScope::Unknown), &targets),
+            ScopeGrant::Grant(targets),
+            "读侧不可信时不得产生任何授权写入"
+        );
+    }
+
+    /// 租户不在册（`None`：`sys_tenant` 无此行）与"值读不出"（`Unknown`）必须可区分：
+    /// 前者要查孤儿角色，后者要查套餐表读取，运维动作完全不同 ⇒ 不得共用一个计数。
+    #[test]
+    fn missing_tenant_row_is_not_conflated_with_unknown_scope() {
+        let targets = vec![10_i64, 20];
+        assert_eq!(
+            menus_allowed_by_scope(None, &targets),
+            ScopeGrant::SkipMissingTenant
+        );
+        assert_ne!(
+            menus_allowed_by_scope(None, &targets),
+            menus_allowed_by_scope(Some(&TenantMenuScope::Unknown), &targets)
+        );
+    }
+
+    /// 采集口径的**单一事实源**：生产码视图（`common::prod_scan` 在 `#[cfg(test)]` 处截断、
+    /// 注释行置空但保留行号）。
+    ///
+    /// ⚠ 本批这两把形状锁的第一版都红在判据自己身上，而**两条红的方向相反**：
+    /// - 否定面 `!SRC.contains(被禁形态)` **恒假**——`include_str!` 把本模块的断言文本
+    ///   一起读了进来，那个字面量就写在源码里；
+    /// - 肯定面 `SRC.contains(应有形态)` **恒真**——生产码退回旧写法时测试照样绿，
+    ///   判据对它声称的那件事没有任何约束力（比恒红更坏：它看起来在工作）。
+    ///
+    /// 同一个"取整份文件而不是取生产视图"的缺陷同时供给这两种相反结局（AGENTS ㉔/㊴②
+    /// 在本仓的第五次复发）。另一条同批实测：`SRC.matches("Phase 3 换源中止").count()` 在整份
+    /// 文件上会把**本测试自己的字面量**算成第四处——"3"这条等式只有在生产视图里才是判据。
+    ///
+    /// 为什么两把锁共用这一个 helper 而各自再写一遍：函数体切片（按下一个顶格 `pub(crate)
+    /// async fn` 取界）与生产视图是两种严格度，写两遍必然漂（AGENTS ㉘）；这里统一取
+    /// 仓库既有的那把采集器，其余六族形状锁用的都是它。
+    fn tenant_prod_view() -> String {
+        crate::common::prod_scan::prod_file(
+            "src/initialize/tenant.rs",
+            &crate::common::prod_scan::Scan::default(),
+        )
+        .text()
+    }
+
+    /// 采集面自证：视图必须**非空**、**确实截在测试模块之前**、且找得到被锁的函数本体。
+    ///
+    /// 这条不是"多一个测试"，是下面两把形状锁的**前置**：截断点若失效（口径被改动），
+    /// "0 违规"会读成"改造仍然成立"，而实际是判据把自己读了进来。有效行数取地板值而非
+    /// 精确值——生产码增减是常态，腰斩才是采集面腐化的信号。
+    #[test]
+    fn tenant_prod_view_cuts_at_the_test_module() {
+        let src = tenant_prod_view();
+        assert!(
+            src.contains("fn menus_allowed_by_scope("),
+            "生产视图里找不到被锁的函数本体 ⇒ 采集面坏了，下面两把形状锁全部不作数"
+        );
+        assert!(
+            !src.contains("mod menu_scope_tests"),
+            "生产视图没有截在 `#[cfg(test)]` 之前：测试模块（含被禁形态的字面量）进了采集面"
+        );
+        assert!(
+            src.lines().filter(|l| !l.trim().is_empty()).count() >= 800,
+            "生产视图有效行数低于地板 800 ⇒ 采集面塌了，不得读成\"没有违规\""
+        );
+    }
+
+    /// 形状锁：`menu_ids` 的读侧不得再出现把 `Err` 折成 `None` 的写法。
+    /// `try_get(...).ok().flatten()` 与 `let Ok(raw) = ... else` 在**类型上**等价，
+    /// 前者把"读侧坏了"读成"该租户不受限制"——这正是本批修掉的那一行为，
+    /// 而纯函数测试看不见调用点是否又折回去（`menus_allowed_by_scope` 照样全绿）。
+    #[test]
+    fn menu_ids_read_errors_are_not_flattened_into_unrestricted() {
+        let src = tenant_prod_view();
+        // 拆成两段拼接：即使采集口径被放宽成"整份文件"，本行源码也不含完整形态，锁不会自指
+        let folded = concat!(r#"try_get::<Option<String>>("", "menu_ids")"#, ".ok()");
+        assert!(
+            !src.contains(folded),
+            "menu_ids 读失败又被 .ok() 折成 None（= 不限制），三态改造失效"
+        );
+        assert!(
+            src.contains(r#"let Ok(raw) = row.try_get::<Option<String>>("", "menu_ids") else"#),
+            "menu_ids 读侧必须显式区分 Ok(None)（不限制）与 Err（Unknown）"
+        );
+        assert!(
+            !src.contains("scope_unreadable"),
+            "旧的单一计量已被拆成 pkg_rows_unattributable / pkg_scope_unknown，\
+             重新引入合并计数会让\"少补\"不可归因"
+        );
+    }
+
+    /// 形状锁（同族第二处，Phase 3 换源）：`sys_dept` 父子关系的读失败不得再被折成
+    /// "这一行不存在"。改造前写的是 `if let Ok(Some(pid)) = …{ children… }`——
+    /// `Err`（列形状不符）与 `NULL`（旧模型的根/孤儿行）走同一条"跳过"路径，
+    /// 而这一段是**唯一不可逆点**且入口按 `sys_tenant > 0 || 映射 > 0` 判"已完成"：
+    /// 按残缺父子图跑完 ⇒ 漏掉的部门永久留在旧 `tenant_id` 下，重启不自愈。
+    ///
+    /// 判据方向：`Err` 必须成为**中止**（`return Err`），`NULL` 仍是跳过（那是值不是故障）。
+    #[test]
+    fn phase3_bfs_read_errors_abort_instead_of_dropping_rows() {
+        let src = tenant_prod_view();
+        // 拆段拼接：被禁形态不在本行源码里连续出现——生产视图已把测试模块截掉，
+        // 这是第二层保险（口径若被放宽回"整份文件"，负向锁仍不会自指）。
+        let banned = concat!(
+            "if let Ok(Some(pid)) = row.try_get::<",
+            r#"Option<i64>>("", "parent_id")"#
+        );
+        assert!(
+            !src.contains(banned),
+            "parent_id 的 Err 又被折成\"跳过\"，换源会按残缺子树 remap 且重启不再修"
+        );
+        let required = concat!(
+            "let Ok(pid) = row.try_get::<",
+            r#"Option<i64>>("", "parent_id") else"#
+        );
+        assert!(
+            src.contains(required),
+            "parent_id 读侧必须显式把 Err 变成中止（`let … else {{ return Err }}`）"
+        );
+        // 中止必须真的发生在**写之前**：BFS 建图排在 `db.begin()` 之前，
+        // 而"跳过根部门"那一条在事务内——它现在必须是 return Err（未提交即整体回滚）
+        let bfs_at = src.find(required).unwrap_or(usize::MAX);
+        let txn_at = src
+            .find("let txn = db.begin().await?;")
+            .unwrap_or(usize::MAX);
+        assert!(
+            bfs_at < txn_at,
+            "父子图读取必须排在事务开始之前（否则中止时已写入的行留在未回滚状态）"
+        );
+        assert_eq!(
+            src.matches("Phase 3 换源中止").count(),
+            3,
+            "三处必中止读取各有一条点名文案（dept_id / parent_id / 根部门行），\
+             少一处说明某一处又退回 `continue`；多一处说明判据把自己读了进来"
+        );
+    }
+}

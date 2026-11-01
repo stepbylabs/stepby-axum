@@ -799,7 +799,11 @@ mod schema_equivalence_lock_tests {
     static LOCK_DB_SEQ: AtomicU64 = AtomicU64::new(0);
 
     /// 唯一临时 sqlite 文件库
-    async fn fresh_db(tag: &str) -> (DatabaseConnection, std::path::PathBuf) {
+    ///
+    /// `pub(super)`：同一份 fixture 也被 `tenant_phase3_read_failure_tests` 用（兄弟模块
+    /// 经 `super::schema_equivalence_lock_tests::fresh_db` 取用）。复制第二份临时库构造
+    /// 会让"进程内序号唯一"这条约束出现两个实现，路径撞了就是随机红（AGENTS ㉘）。
+    pub(super) async fn fresh_db(tag: &str) -> (DatabaseConnection, std::path::PathBuf) {
         let pid = std::process::id();
         let seq = LOCK_DB_SEQ.fetch_add(1, Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
@@ -2683,5 +2687,153 @@ mod flow_index_scope_tests {
                 && tenant_scope_src.contains("\"uk_flow_task_biz\""),
             "ensure_tenant_unique_scope 必须同时知道旧索引（删）与新索引（建）"
         );
+    }
+}
+
+/// Phase 3 换源（唯一不可逆点）的读失败面：`sys_dept` 读不出来必须**中止**，不得剔行。
+///
+/// 立案（b146）：改造前三处读点是 `continue` 与 `if let Ok(Some(pid))`——`Err`（列形状 /
+/// affinity 不符）与 `NULL`（旧模型根 / 孤儿行）走同一条"跳过"路径。而入口用
+/// `sys_tenant > 0 || 映射 > 0` 判"已完成"：按残缺父子图跑完一次，漏掉的部门就带着旧
+/// `tenant_id` 永久留在原处，重启也不再修——"做错一半"比"没做"更坏。
+///
+/// 两条判据缺一不可：
+/// 1. **中止面**：树里一条 `parent_id` 不可解码 ⇒ 返回 Err（点名 parent_id）且 `sys_tenant` 0 行；
+/// 2. **不过度**：`parent_id` 为 NULL 的行照常跳过、换源照样成功——NULL 是**值**不是故障，
+///    若它同样触发中止，正常存量库会一个租户都换不过来（把"默认安全"做成"默认不可用"）。
+mod tenant_phase3_read_failure_tests {
+    use crate::initialize::ensure_tenant_phase3;
+    use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement};
+
+    async fn create_dept_table(db: &DatabaseConnection) {
+        db.execute_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "CREATE TABLE sys_dept (\
+                 dept_id INTEGER PRIMARY KEY, \
+                 parent_id BIGINT NULL, \
+                 dept_name VARCHAR(64) NULL, \
+                 status VARCHAR(1) NULL, \
+                 tenant_id BIGINT NOT NULL DEFAULT 0, \
+                 del_flag VARCHAR(1) NOT NULL DEFAULT '0'\
+             )"
+            .to_string(),
+        ))
+        .await
+        .expect("建 sys_dept 失败");
+        // remap 子树段对 sys_user 的 `UPDATE … tenant_id` 是无条件语句（真实库里 Phase 2
+        // 兜底已保证这两列存在），因此这里按真实形态给出最小列集，而不是让它去撞"表不存在"
+        db.execute_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "CREATE TABLE sys_user (\
+                 user_id INTEGER PRIMARY KEY, \
+                 dept_id BIGINT NULL, \
+                 tenant_id BIGINT NOT NULL DEFAULT 0\
+             )"
+            .to_string(),
+        ))
+        .await
+        .expect("建 sys_user 失败");
+    }
+
+    async fn exec(db: &DatabaseConnection, sql: &str) {
+        db.execute_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            sql.to_string(),
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("执行失败：{sql} ⇒ {e}"));
+    }
+
+    /// 根部门 200 + 子部门 201（parent_id = 200）：正常换源的最小形状。
+    async fn seed_root_and_child(db: &DatabaseConnection) {
+        exec(
+            db,
+            "INSERT INTO sys_dept (dept_id, parent_id, dept_name, status) \
+             VALUES (200, 0, '旧租户A', '0')",
+        )
+        .await;
+        exec(
+            db,
+            "INSERT INTO sys_dept (dept_id, parent_id, dept_name, status) \
+             VALUES (201, 200, '子部门', '0')",
+        )
+        .await;
+    }
+
+    async fn count_tenants(db: &DatabaseConnection) -> i64 {
+        db.query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT COUNT(*) AS n FROM sys_tenant".to_string(),
+        ))
+        .await
+        .expect("读 sys_tenant 失败")
+        .and_then(|r| r.try_get::<i64>("", "n").ok())
+        .expect("sys_tenant 计数取不出来（表未建？）")
+    }
+
+    #[tokio::test]
+    async fn undecodable_parent_id_aborts_instead_of_remapping_a_partial_tree() {
+        let (db, path) = super::schema_equivalence_lock_tests::fresh_db("phase3_bad_parent").await;
+        create_dept_table(&db).await;
+        seed_root_and_child(&db).await;
+        // 一条不可按 BIGINT 解码的 parent_id：SQLite 动态类型允许它落库，读侧必然 Err
+        exec(
+            &db,
+            "INSERT INTO sys_dept (dept_id, parent_id, dept_name, status) \
+             VALUES (202, '不是数字', '坏行', '0')",
+        )
+        .await;
+
+        let err = ensure_tenant_phase3(&db)
+            .await
+            .expect_err("parent_id 读不出来时必须中止换源（剔行会让残缺子树永久留在旧租户下）");
+        assert!(
+            err.to_string().contains("sys_dept.parent_id"),
+            "中止原因必须点名 parent_id（运维据此去查列形状）：{err}"
+        );
+        assert_eq!(
+            count_tenants(&db).await,
+            0,
+            "中止后不得留下任何已建租户行——这是唯一不可逆点的半成品"
+        );
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn null_parent_id_is_a_value_and_still_remaps() {
+        let (db, path) = super::schema_equivalence_lock_tests::fresh_db("phase3_null_parent").await;
+        create_dept_table(&db).await;
+        seed_root_and_child(&db).await;
+        // 旧模型里 parent_id 为 NULL 的根/孤儿行：值不是故障，必须照常跳过
+        exec(
+            &db,
+            "INSERT INTO sys_dept (dept_id, parent_id, dept_name, status) \
+             VALUES (203, NULL, '孤儿部门', '0')",
+        )
+        .await;
+
+        ensure_tenant_phase3(&db)
+            .await
+            .expect("NULL parent_id 不是读失败，换源必须成功（否则正常存量库一个租户都换不过来）");
+        assert_eq!(
+            count_tenants(&db).await,
+            1,
+            "只有一个根部门（200）⇒ 只建一个租户；203 只是孤儿行"
+        );
+        let code = db
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT tenant_code AS c FROM sys_tenant".to_string(),
+            ))
+            .await
+            .expect("读 sys_tenant 失败")
+            .and_then(|r| r.try_get::<String>("", "c").ok())
+            .expect("tenant_code 取不出来");
+        assert_eq!(code, "t200", "租户 code 由根部门 dept_id 确定性生成");
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 }
