@@ -7,6 +7,7 @@ pub mod export_gate;
 pub mod extractor_contract;
 pub mod idempotency;
 pub mod locale;
+pub mod op_recording;
 pub mod oper_log;
 pub mod permission;
 pub mod platform_guard;

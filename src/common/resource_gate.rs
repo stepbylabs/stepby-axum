@@ -91,10 +91,12 @@ pub enum HeavyEntry {
     BackupDownload,
     /// 看板数据源取数（单页按白名单数据源**扇出**，b140 扩员）
     BoardSourceData,
+    /// 操作录制回放（b147 扩员）：一次回放连续出网 N 次并可能写对端业务数据
+    RecordingReplay,
 }
 
 /// 成员数（数组长度与 `ALL` 共用；新增变体必须同时改这里，否则类型检查会失败）。
-const ENTRY_COUNT: usize = 15;
+const ENTRY_COUNT: usize = 16;
 
 /// 闸满后给客户端的退避提示（秒）。取 30 的理由：这一族单次耗时在 10 秒～数分钟，
 /// 30 秒既不会让人立刻重试打在同一次运行上，也不至于长到像"服务坏了"。
@@ -121,6 +123,7 @@ impl HeavyEntry {
         HeavyEntry::MsgOutbound,
         HeavyEntry::BackupDownload,
         HeavyEntry::BoardSourceData,
+        HeavyEntry::RecordingReplay,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -140,6 +143,7 @@ impl HeavyEntry {
             HeavyEntry::MsgOutbound => "msg:outbound",
             HeavyEntry::BackupDownload => "backup:download",
             HeavyEntry::BoardSourceData => "report:board-source",
+            HeavyEntry::RecordingReplay => "tool:recording-replay",
         }
     }
 
@@ -191,6 +195,11 @@ impl HeavyEntry {
             // 够一屏扇出再加两条重试余量；两路看板同时刷新会有请求被拒，而卡片取数是人类
             // 可重来的动作 ⇒ 取拒绝（A.2），失败态由 b109 的"保留旧图 + 重试"通道承接。
             HeavyEntry::BoardSourceData => 8,
+            // 回放：一次调用会连续出网 N 次（N ≤ 200）并可能写对端业务数据。
+            // 取 2 的判据与 `tool:http-debug` 同源——它是"人手动触发的一次排障/验收动作"，
+            // 两个管理员同时回放已覆盖正常需求；取更大只会让"多条回放同时打同一个目标
+            // 服务"成为新的过载来源，而取 1 会让并行集成测试之间互相 429（假失败）。
+            HeavyEntry::RecordingReplay => 2,
         }
     }
 
@@ -211,6 +220,7 @@ impl HeavyEntry {
             HeavyEntry::MsgOutbound => 12,
             HeavyEntry::BackupDownload => 13,
             HeavyEntry::BoardSourceData => 14,
+            HeavyEntry::RecordingReplay => 15,
         }
     }
 
@@ -408,7 +418,7 @@ mod tests {
             "成员表必须与枚举一一对应"
         );
         assert_eq!(
-            ENTRY_COUNT, 15,
+            ENTRY_COUNT, 16,
             "成员数变了 ⇒ 槽位/计数表/接线反查都要同步扩"
         );
         for (i, entry) in HeavyEntry::ALL.iter().copied().enumerate() {
@@ -705,6 +715,15 @@ mod tests {
                 "src/handler/sys_report_board_handler.rs",
                 ".resolve_source(&source_key,",
             ),
+            (
+                // b147：回放一次连续出网 N 次（N ≤ 200），且会把本租户的真实写请求
+                // 重放到目标服务上。取闸必须排在 `start(` 之前——回放一旦启动就再也
+                // 无法"因为闸满而拒绝"，那时背压已经变成"跑完再告诉你忙"。
+                "tool:recording-replay",
+                "HeavyEntry::RecordingReplay",
+                "src/handler/op_recording_handler.rs",
+                ".start(",
+            ),
         ];
         // 正向 + 反向：ALL 与登记表必须逐成员对上（缺哪一侧都由这一条点名）。
         // 同一入口多行接线，按 label 去重后再比。
@@ -748,11 +767,11 @@ mod tests {
         }
         assert_eq!(
             files.len(),
-            20,
-            "反查必须覆盖全部 20 个接线文件（少了就是有人把接线挪出了视野）。\
+            21,
+            "反查必须覆盖全部 21 个接线文件（少了就是有人把接线挪出了视野）。\
              这是**等式**而不是下限：b140 起接线文件数由 18 增至 20（新增看板取数与备份下载\
-             两条链），等式逼着每一个改接线的人重新数一遍——`>=` 会让\"删掉一行\"静默通过，\
-             而那正是本断言唯一防的事"
+             两条链），b147 增至 21（新增操作录制回放）；等式逼着每一个改接线的人重新数一遍——\
+             `>=` 会让\"删掉一行\"静默通过，而那正是本断言唯一防的事"
         );
     }
 

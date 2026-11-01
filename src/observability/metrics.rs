@@ -97,6 +97,16 @@ pub struct MetricsRegistry {
     outbound_counters: RwLock<HashMap<(String, String), u64>>,
     /// b72：出站依赖 / 后台任务耗时直方图（component → 系列）
     outbound_durations: RwLock<HashMap<String, OutboundDurationSeries>>,
+    /// b147：操作录制链路事件计数（phase, outcome）→ 次数。
+    ///
+    /// phase：`capture`（中间件把一次请求记进录制）/ `preview`（预检）/ `replay`（真执行）；
+    /// outcome：采集侧 `recorded|not_mutating|excluded|bad_path|full|error`，
+    /// 执行侧 `success|failed|partial`。
+    ///
+    /// 为什么不复用 `outbound_counters`：那一族的语义是"出站依赖的健康度"，
+    /// 把"这次请求因为路径在排除清单里所以没录"记进去，会让出站故障率出现
+    /// 与自己无关的噪声（AGENTS B.4「口径失真比缺指标更糟」）。
+    recording_counters: RwLock<HashMap<(String, String), u64>>,
     /// 告警指标源：最近 5xx 响应时间戳环形缓冲（真实记录点 =
     /// [`MetricsRegistry::record`]，由 monitoring_middleware 每请求调用）。
     ///
@@ -168,6 +178,7 @@ impl Default for MetricsRegistry {
             job_counters: RwLock::new(HashMap::new()),
             job_durations: RwLock::new(HashMap::new()),
             outbound_counters: RwLock::new(HashMap::new()),
+            recording_counters: RwLock::new(HashMap::new()),
             outbound_durations: RwLock::new(HashMap::new()),
             recent_5xx: Mutex::new(VecDeque::new()),
         }
@@ -450,6 +461,21 @@ impl MetricsRegistry {
         s
     }
 
+    /// 操作录制链路事件计数（phase, outcome）→ `stepby_recording_events_total`。
+    ///
+    /// 调用点两处：采集中间件（每次带 `X-Record-Into` 的非读请求一条）与回放执行器
+    /// （每趟回放一条终局）。**不记耗时**：采集的 DB 写已经异步化，记时长会得到
+    /// "0.2ms"这种与使用者体感无关的数字，反而让人以为它很便宜。
+    pub fn record_recording(&self, phase: &str, outcome: &str) {
+        let mut counters = match self.recording_counters.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *counters
+            .entry((phase.to_string(), outcome.to_string()))
+            .or_insert(0) += 1;
+    }
+
     /// AK 开放 API 指标：`ak_sign` 中间件每请求记录一次
     ///
     /// - 请求总量：`stepby_ak_requests_total{path,outcome}`
@@ -504,6 +530,28 @@ impl MetricsRegistry {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
+
+        // ===== b147 操作录制链路事件 =====
+        // 采集面由 `record_recording` 的实际调用决定。三相位各自成组，使"录不进去"
+        // 与"回放不通过"在监控上是两件可分的事（同名一个 outcome 会互相淹没）。
+        if let Ok(recording_counters) = self.recording_counters.read() {
+            s.push_str(
+                "# HELP stepby_recording_events_total 操作录制链路事件数（phase,outcome）\n",
+            );
+            s.push_str("# TYPE stepby_recording_events_total counter\n");
+            let mut rec_keys: Vec<&(String, String)> = recording_counters.keys().collect();
+            rec_keys.sort();
+            for k in rec_keys {
+                if let Some(c) = recording_counters.get(k) {
+                    s.push_str(&format!(
+                        "stepby_recording_events_total{{phase=\"{}\",outcome=\"{}\"}} {}\n",
+                        escape_label(&k.0),
+                        escape_label(&k.1),
+                        c
+                    ));
+                }
+            }
+        }
 
         s.push_str("# HELP stepby_ak_requests_total AK 开放 API 请求数（path,outcome）\n");
         s.push_str("# TYPE stepby_ak_requests_total counter\n");

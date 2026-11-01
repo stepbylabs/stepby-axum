@@ -11,6 +11,7 @@
 pub mod base;
 pub mod flow_demo_doc;
 pub mod gen_table;
+pub mod op_recording;
 pub mod sys_alert_rule;
 pub mod sys_audit_change;
 pub mod sys_backup_log;

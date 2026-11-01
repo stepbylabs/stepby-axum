@@ -61,6 +61,7 @@ pub mod monitor_log_router;
 pub mod monitor_observability_router;
 pub mod monitor_online_router;
 pub mod monitor_server_router;
+pub mod op_recording_router;
 pub mod public;
 pub mod report_dataset_router;
 pub mod scim_router;
@@ -104,6 +105,7 @@ use crate::middleware::auth_middleware;
 use crate::middleware::export_gate_middleware;
 use crate::middleware::idempotency_middleware;
 use crate::middleware::locale_middleware;
+use crate::middleware::op_recording::op_recording_middleware;
 use crate::middleware::oper_log_middleware;
 use crate::middleware::permission_middleware;
 use crate::middleware::pwd_gate_middleware;
@@ -198,6 +200,7 @@ pub(crate) fn build_app_with_embedded_mode(state: Arc<AppState>, embedded_mode: 
         .merge(sys_backup_router::backup_routes())
         .merge(ip_location_router::ip_location_routes())
         .merge(sys_task_router::task_routes())
+        .merge(op_recording_router::op_recording_routes())
         .merge(flow_router::flow_routes())
         .merge(tool_gen_router::gen_routes())
         .merge(common_router::common_routes())
@@ -219,6 +222,11 @@ pub(crate) fn build_app_with_embedded_mode(state: Arc<AppState>, embedded_mode: 
         // 全部通过之后、handler 之前执行；闸已满时 429 在 DB 全量读之前返回。
         // 真正的 `export:excel` 许可仍由 `common::excel` 构造点获取并覆盖 xlsx 构建段
         // （本层刻意不持有许可，理由见 middleware/export_gate.rs 模块文档）。
+        // b147 操作录制采集：`route_layer` 的**第一条**是最内层 ⇒ 它在 auth →
+        // rate_limit → idempotency → pwd_gate → permission → oper_log → cache 全部通过
+        // 之后、handler 之前执行。放在这里而不是更外层，是因为它需要 `Claims`（租户/用户）
+        // 与已完成的权限判定；自己再验一次令牌/权限就会与中间件形成两把尺。
+        .route_layer(from_fn_with_state(state.clone(), op_recording_middleware))
         .route_layer(from_fn(export_gate_middleware))
         .route_layer(from_fn_with_state(
             ResponseCache::default(),

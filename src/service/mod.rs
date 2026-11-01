@@ -22,6 +22,8 @@ pub mod global_search_service;
 pub mod im_robot_provider;
 pub mod ip_location_service;
 pub mod mailer_service;
+pub mod op_recording;
+pub mod op_recording_replay;
 pub mod oper_log_chain_seed;
 pub mod report_dataset_service;
 pub mod scim_group_service;

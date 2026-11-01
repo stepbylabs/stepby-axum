@@ -28,6 +28,7 @@ pub mod monitor_server_handler;
 /// 生产代码防 panic 守卫（批六十六）：handler 不得 `.unwrap()`
 #[cfg(test)]
 pub mod no_panic_guard;
+pub mod op_recording_handler;
 /// 出站组件指标覆盖总锁（批七十四）：每个 `reqwest::Client` 构造点必须有可验证的结局归属
 #[cfg(test)]
 pub mod outbound_metrics_guard;

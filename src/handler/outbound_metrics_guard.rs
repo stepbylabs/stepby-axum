@@ -179,6 +179,14 @@ mod outbound_metrics_guard_lock {
             "try_new",
             Disposition::Caller("src/storage/mod.rs", "storage:"),
         ),
+        // 操作录制回放（b147）：客户端在 `execute_steps` 里构造一次、逐步骤复用；
+        // 结局由同函数循环体里的 `OutboundGuard::start("recording_replay")` 逐步记账
+        // （一次回放 = N 条 outbound 事实，放在 run_one 里会让"构造失败"也记成出站）。
+        (
+            "src/service/op_recording_replay.rs",
+            "execute_steps",
+            Disposition::ThisFn(r#"OutboundGuard::start("recording_replay")"#),
+        ),
     ];
 
     fn root() -> PathBuf {

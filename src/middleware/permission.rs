@@ -924,6 +924,43 @@ const PERM_ROUTE_TABLE: &[(&str, &str, &str)] = &[
     // 导出（W-11）：复用列表权限键——可见范围与 list 完全一致（租户 + data_scope），
     // 避免"列表看不到但导出能拿到"的数据泄露旁路
     ("POST", "/system/flow/export", "system:flow:list"),
+    // ===== 操作录制与回放（b147）=====
+    //
+    // 权限切分口径：
+    // - `list` / `query`：看。录制内容含真实业务请求体，看得见就等于看得见业务数据形状，
+    //   因此详情单独一个键，不与 list 复用。
+    // - `edit`：改步骤（追加/删除/清空）。**回放用的是编辑后的内容**，所以编辑权实质
+    //   等于"决定下一跑会执行什么"，必须与 `replay` 分开授予。
+    // - `replay`：真执行。这是唯一会改变业务数据的键。
+    // - `export`：把步骤导出成脚本带走（数据出口，与 `system:backup:` 同一性质的判断）。
+    ("GET", "/tool/recording/list", "tool:recording:list"),
+    ("GET", "/tool/recording/{recordingId}", "tool:recording:query"),
+    ("POST", "/tool/recording", "tool:recording:add"),
+    ("PUT", "/tool/recording", "tool:recording:edit"),
+    ("DELETE", "/tool/recording/{recordingId}", "tool:recording:remove"),
+    ("POST", "/tool/recording/{recordingId}/steps", "tool:recording:edit"),
+    ("DELETE", "/tool/recording/{recordingId}/steps", "tool:recording:edit"),
+    (
+        "DELETE",
+        "/tool/recording/{recordingId}/steps/{stepId}",
+        "tool:recording:edit",
+    ),
+    (
+        "POST",
+        "/tool/recording/{recordingId}/replay",
+        "tool:recording:replay",
+    ),
+    (
+        "POST",
+        "/tool/recording/{recordingId}/export",
+        "tool:recording:export",
+    ),
+    ("GET", "/tool/recording/{recordingId}/runs", "tool:recording:query"),
+    (
+        "GET",
+        "/tool/recording/{recordingId}/runs/{runId}",
+        "tool:recording:query",
+    ),
 ];
 
 /// 根据 HTTP 方法和匹配路径返回所需权限标识。

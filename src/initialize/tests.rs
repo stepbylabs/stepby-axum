@@ -780,6 +780,12 @@ mod schema_equivalence_lock_tests {
         "sys_web_hook_log",
         // 前端错误（m20260821_000001）：ensure_frontend_error_device_type 表不存在即跳过。
         "sys_frontend_error",
+        // 操作录制模块（m20261101_000001）：整模块由迁移管理，initialize 侧**没有任何兜底**
+        // （也没有菜单兜底）——表与菜单同进同退，极老存量库补齐须整模块跑迁移；
+        // 只补菜单会造出「入口可见但页面 500」的假入口，故与 MIGRATION_ONLY_TABLES 共退让。
+        "sys_op_recording",
+        "sys_op_recording_step",
+        "sys_op_recording_run",
     ];
 
     /// 库 B 有而库 A 无的表：**兜底超集**白名单（显式命名 + 理由）。
@@ -1100,6 +1106,7 @@ mod schema_equivalence_lock_tests {
             || (3261..=3268).contains(&id)
             || (3431..=3445).contains(&id)
             || (3531..=3544).contains(&id)
+            || (4200..=4207).contains(&id)
             || id == 160
             || id == 1061
     }

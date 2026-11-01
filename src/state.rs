@@ -102,6 +102,10 @@ pub struct AppState {
     pub backup_service: SysBackupService,
     /// 任务进度 Service
     pub task_service: SysTaskService,
+    /// 操作录制与回放 Service（录制抬头/步骤/脚本导出）
+    pub op_recording_service: crate::service::op_recording::OpRecordingService,
+    /// 操作回放执行器（后台回环 HTTP 重放 + 逐步骤结论）
+    pub op_recording_replay_service: crate::service::op_recording_replay::OpRecordingReplayService,
     /// 消息渠道与模板管理 Service
     pub msg_service: SysMsgService,
     /// 审批工作流 Service（方案 B′）
@@ -402,6 +406,9 @@ impl AppState {
             gen_table_service: GenTableService::new(db.clone()),
             backup_service: SysBackupService::new(db.clone(), config.clone()),
             task_service: SysTaskService::new(db.clone()),
+            op_recording_service: crate::service::op_recording::OpRecordingService::new(db.clone()),
+            op_recording_replay_service:
+                crate::service::op_recording_replay::OpRecordingReplayService::new(db.clone()),
             msg_service: SysMsgService::new(db.clone(), config.clone()),
             flow_service: SysFlowService::new(
                 db.clone(),
