@@ -59,10 +59,12 @@ pub(crate) fn init_cache_mode_guards(
 ///
 /// 修复指引：多实例部署置 `[rate_limit].mode = "redis"`（或环境变量 `RATE_LIMIT_MODE=redis`），
 /// 由 Redis 分布式令牌桶共享同一配额；Redis 命令失败时 fail-closed 返回 503。
+/// 不想依赖 Redis 的多副本部署可置 `auto` —— 它跟随 `[cache].mode` 的裁决（b146 新增档），
+/// 但**只有**裁决结果真是 Redis 时才是 Redis，所以本守卫对它同样成立。
 pub(crate) fn init_rate_limit_guards(settings: &Settings) -> bool {
     if rate_limit_local_multi_instance_misconfigured(
         settings.scheduler.replicas,
-        settings.rate_limit.mode(),
+        settings.rate_limit_mode(),
     ) {
         tracing::warn!(
             replicas = settings.scheduler.replicas,

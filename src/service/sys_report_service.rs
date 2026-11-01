@@ -1622,25 +1622,19 @@ mod tests {
         panic!("函数 {name} 花括号不配平");
     }
 
-    /// 判据：**取数语句**里不得存在"把失败折成默认值"的三类形状。
+    /// 判据：**取数语句**里不得存在"把失败折成默认值"的形状。
     ///
-    /// 刀口取"含 `.await` 的语句"而不是整段函数体：派生默认值（如
-    /// `trend_map.get(&date_str).unwrap_or(0)`——查不到就是 0 天）与整数
-    /// 溢出兜底（`i64::try_from(..).unwrap_or(i64::MAX)`）都不是取数失败，
-    /// 按全文禁 `unwrap_or(0)` 会把它们一并判红，下一批就会去放宽判据。
-    fn folds_errors_into_defaults(body: &str) -> Vec<&'static str> {
-        let mut hits = Vec::new();
-        for statement in body.split(';') {
-            if !statement.contains(".await") {
-                continue;
-            }
-            for needle in ["unwrap_or(0)", "unwrap_or_default()", ".ok()"] {
-                if statement.contains(needle) && !hits.contains(&needle) {
-                    hits.push(needle);
-                }
-            }
-        }
-        hits
+    /// 尺取共用实现 `common::fold_scan`（b149 项 27 并轨）：本仓此前有**三份**这一族
+    /// 的私有谓词，口径互不相等，`unwrap_or(None)` / `unwrap_or(false)` 这两型
+    /// 长期没有任何判据覆盖（实测生产码各有 2 处静默）。并轨的方向取**最严的并集**，
+    /// 不是取交集——取交集等于借"统一"之名放松另外两把锁（b87 §6 同一条纪律）。
+    ///
+    /// 刀口仍是"含 `.await` 的语句"：派生默认值（如
+    /// `trend_map.get(&date_str).unwrap_or(0)`——查不到就是 0 天）与整数溢出兜底
+    /// （`i64::try_from(..).unwrap_or(i64::MAX)`）都不是取数失败，按全文禁
+    /// `unwrap_or(0)` 会把它们一并判红，下一批就会去放宽判据。
+    fn fold_hits(body: &str) -> Vec<crate::common::fold_scan::FoldHazard> {
+        crate::common::fold_scan::folds_errors_into_defaults(body)
     }
 
     #[test]
@@ -1652,13 +1646,38 @@ mod tests {
             "snapshot_msg",
             "count_of",
         ] {
-            let hits = folds_errors_into_defaults(&function_body(name));
+            let hits = fold_hits(&function_body(name));
             assert!(
                 hits.is_empty(),
                 "{name} 把取数失败折成了默认值（命中 {hits:?}）：一次 DB 抖动会变成报表里的 0/空趋势，\
                  而预览与订阅推送都会把它当成事实发出去——必须 `?` 上抛"
             );
         }
+    }
+
+    /// 并轨后的尺必须**独立承重**：一支只有共用尺看得见、本地旧口径（三支字面量）
+    /// 完全打不中的折叠，必须让判据判否。否则"并轨"只是把三份实现换成一份实现，
+    /// 而扩大的那一半从未被检验（AGENTS ⑥：反脆弱用例要有期望成功的正控对）。
+    #[test]
+    fn shared_fold_strictness_is_load_bearing_in_snapshot_stats() {
+        // 旧口径只认 `unwrap_or(0)` / `unwrap_or_default()` / `.ok()`：这一支一支都不命中
+        let old_caliber_blind = "let live = store.exists(&k).await.unwrap_or(true);\n";
+        assert!(
+            !old_caliber_blind.contains("unwrap_or(0)")
+                && !old_caliber_blind.contains("unwrap_or_default()")
+                && !old_caliber_blind.contains(".ok()"),
+            "夹具必须落在旧口径的盲区里，否则这条证明不了新腿"
+        );
+        assert_eq!(
+            fold_hits(old_caliber_blind).len(),
+            1,
+            "共用尺必须抓到旧口径看不见的折叠形状"
+        );
+        // 正控：合法的派生默认值（没有 `Err` 来源）不得被抓
+        assert!(
+            fold_hits("let day_count = trend_map.get(&date_str).copied().unwrap_or(0);\n")
+                .is_empty()
+        );
     }
 
     /// 接线反查：三条快照分支必须真的用 `?` 传播，而不是只把返回类型改宽
@@ -1706,7 +1725,7 @@ mod tests {
                 .map(|c| c as i64)
                 .unwrap_or(0);
         "#;
-        let hits = folds_errors_into_defaults(original_shape);
+        let hits = fold_hits(original_shape);
         assert_eq!(hits.len(), 3, "缺陷形状必须三处全被抓到：{hits:?}");
 
         let compliant = r#"
@@ -1716,7 +1735,7 @@ mod tests {
             let capped = i64::try_from(count).unwrap_or(i64::MAX);
         "#;
         assert!(
-            folds_errors_into_defaults(compliant).is_empty(),
+            fold_hits(compliant).is_empty(),
             "合规形状（含派生默认值与整数溢出兜底）不得被误报"
         );
     }

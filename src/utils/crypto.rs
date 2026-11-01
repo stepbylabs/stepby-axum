@@ -107,12 +107,22 @@ fn derive_aes_key_v2(master_key: &str, salt: &[u8]) -> [u8; 32] {
 /// 加密后的字符串（带 `enc2:` 前缀），失败返回 anyhow::Error
 /// v5-E6：敏感列写入口（幂等）。
 ///
-/// - `CONFIG_ENC_KEY` 未配置 → 原样明文（迁移期 fail-open，与 id_token_secret 策略一致）
+/// - 入参为空串 → 原样返回（空值无需加密，属永久正常态，不参与"待自愈"统计）
+/// - `CONFIG_ENC_KEY` 未配置 → 原样明文（迁移期 fail-open，与 id_token_secret 策略一致；
+///   **配好密钥后可由启动回填补上**，因此这一支与上一支的整改动作不同，必须分开可观测）
 /// - 值已带 `enc3:`/`enc2:`/`enc:` 前缀 → 原样返回（**防双重加密**：出参明文回显→前端回传→重复 seal；
 ///   格式升级（enc2:→enc3:）由启动回填 [`crate::initialize`] 专职负责，seal 保持纯幂等）
-/// - 其余 → 信封加密（enc3:k1，失败返回 Err，调用方 fail-closed 拒绝写入）
+/// - 其余 → 信封加密（enc3:k1，失败返回 Err，调用方**无法**在上层拒绝（`Into<Value>` 由
+///   sea-orm 内部调用，没有失败通道），结局见 [`crate::common::encrypted_value::SealOutcome::Degraded`]）
 pub fn seal_sensitive_value(plaintext: &str, master_key: &str) -> anyhow::Result<String> {
-    if master_key.is_empty() || plaintext.is_empty() {
+    // 三种"原样返回"的**原因不同、整改动作也不同**，因此逐条分支而不是一条 `||`：
+    // 空值本来就无需加密（永久正常态）；密钥缺失是配置缺位（配好密钥后由 v5-E6 回填自愈）；
+    // 已带前缀是幂等（防双重加密）。折叠成一个 `if` 时，调用点只能看见"出参等于入参"，
+    // 于是"这条永远不用管"和"这条是因为没配密钥才明文"在观测面上同形（b149 项 17）。
+    if plaintext.is_empty() {
+        return Ok(plaintext.to_string());
+    }
+    if master_key.is_empty() {
         return Ok(plaintext.to_string());
     }
     if is_encrypted(plaintext) {
@@ -123,13 +133,23 @@ pub fn seal_sensitive_value(plaintext: &str, master_key: &str) -> anyhow::Result
 
 /// v5-E6：敏感列读出口。解密失败（密钥不匹配/数据损坏）时**原样返回存储值**并记日志——
 /// 读路径宽松化：密文回显给授权管理员优于整列表 500；明文旧数据（回填前）原样通过。
+///
+/// "明文旧数据"必须在**进解密器之前**分流：旧写法对它照样调 `decrypt_config_value`，
+/// 于是读一条历史明文就产生一条 `敏感值解密失败` ERROR——每次读、每行都打，
+/// 把真正需要人动手的"带信封却解不开（密钥轮换未登记旧 key_id / 数据损坏）"淹成噪声
+/// （AGENTS C.9 的失败归属：返回的串两型相同，日志与计数必须不同）。
+/// 返回值语义不变（两型都原样返回 `stored`），只是不再为"本来就不是密文"报错。
 pub fn unseal_sensitive_value(stored: &str, master_key: &str) -> String {
     if stored.is_empty() {
         return String::new();
     }
+    if !is_encrypted(stored) {
+        return stored.to_string();
+    }
     decrypt_config_value(stored, master_key).unwrap_or_else(|e| {
         tracing::error!(
-            "敏感值解密失败（原样返回存储值，请检查启动回填与 CONFIG_ENC_KEY）: {}",
+            "敏感值解密失败（带信封前缀但解不开，原样返回存储值；请检查 CONFIG_ENC_KEY 与 \
+             key_id 是否仍在轮换表内）: {}",
             e
         );
         stored.to_string()

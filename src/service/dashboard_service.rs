@@ -356,31 +356,42 @@ async fn count_online_sessions(state: &Arc<AppState>, tenant_scope: Option<i64>)
         .collect();
 
     // 旧会话兜底：按 user_id 回查 sys_user.tenant_id（否则租户看不到本租户旧会话的在线数）
+    //
+    // b146：这里维持 best-effort（在线数只是首页一个数，失败不该让整块看板 500），
+    // 但**不得**再写成 `unwrap_or_else(|_| HashMap::new())`——那种写法把"查不了"洗成
+    // "这些会话都不属于本租户"，少算了多少人无从判断。改判 `LegacyOwnerLookup` 后
+    // 失败与"查到了但没这个人"分得开，WARN 因此能报出**受影响的条数**。
+    // 残余（归属未定的旧会话落进平台桶 ⇒ 租户侧这个数可能少算）按实登记
+    // N-149-A（`docs/optimization/quality-batch-149-2026-11-02.md` §6）。
     let legacy_user_ids: Vec<i64> = sessions
         .iter()
         .filter(|s| s.tenant_id == 0 && s.user_id > 0)
         .map(|s| s.user_id)
         .collect();
-    let legacy_tenant_map = if legacy_user_ids.is_empty() {
-        std::collections::HashMap::new()
-    } else {
+    let legacy_owner = crate::common::session_owner::LegacyOwnerLookup::from_outcome(
+        &legacy_user_ids,
         state
             .user_service
             .tenant_ids_by_user_ids(&legacy_user_ids)
             .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("在线会话租户兜底回填失败（按平台会话处理）: {}", e);
-                std::collections::HashMap::new()
-            })
-    };
+            .map_err(|e| e.to_string()),
+    );
+    if let Some(reason) = legacy_owner.failed() {
+        tracing::warn!(
+            "在线数租户回查失败：本租户在线数已按「不含这些旧会话」计（待回查 {} 条，可能少算）: {}",
+            legacy_user_ids.len(),
+            reason
+        );
+    }
 
     sessions
         .iter()
         .filter(|s| {
-            let session_tid = if s.tenant_id != 0 {
-                s.tenant_id
-            } else {
-                legacy_tenant_map.get(&s.user_id).copied().unwrap_or(0)
+            // Unknown 在这一条路上按"不属于本租户"计（operator_tid != 0 时），与改造前同数；
+            // 区别是现在这句话有可归因的 WARN 撑着，而不是静默。
+            let session_tid = match legacy_owner.owner_of(s.tenant_id, &s.user_id) {
+                crate::common::session_owner::OwnerVerdict::Known(tid) => tid,
+                _ => 0,
             };
             session_tid == operator_tid
         })

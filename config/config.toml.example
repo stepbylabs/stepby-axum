@@ -696,11 +696,16 @@ cooldown_secs = 60        # 打开后的冷却秒数，到期放行一次探测�
 # ⚠️ redis 档下 Redis 命令失败一律 **fail-closed 返回 503**（限流器不可用却放行 = 攻击者获准），
 #    与限流配置查询失败的既有口径一致。单实例部署若无特殊需要，保持 local 即可。
 # ⚠️ 非法 mode 取值回落 local 并打 WARN（fail-safe，不拒绝启动）。
-# ⚠️ 也可用环境变量 RATE_LIMIT_MODE=local|redis 覆盖（容器场景无需改配置文件）。
+# ⚠️ 也可用环境变量 RATE_LIMIT_MODE=local|redis|auto 覆盖（容器场景无需改配置文件）。
+# ⚠️ `auto`（2026-11-01 b146 新增档）= 跟随 [cache].mode 的**裁决结果**：判到 Redis 就用共享桶，
+#    判到 Local 就用进程内桶。它存在的理由是 Helm chart 那类"副本数 ≥2、Redis 可能有也可能没有"
+#    的形态：写死 local 会让配额被放大 N 倍且只有一句 WARN，写死 redis 会让没配 Redis 的部署
+#    每次请求 fail-closed 503。裁决谓词与 [cache] 同源，不在两处各写一份。
 # ⚠️ 启动期自检（2026-10-13 新增）：`[scheduler].replicas > 1` 且 mode = "local" 时启动打 WARN
-#    （进程内桶在多副本下会放大配额，拒绝静默失效）——多副本部署请同时置 replicas 与 mode=redis。
+#    （进程内桶在多副本下会放大配额，拒绝静默失效）——多副本部署请同时置 replicas 与 mode=redis
+#    （或 mode=auto 且确实配了 Redis）。
 [rate_limit]
-mode = "local"           # local（默认，= 现状）| redis
+mode = "local"           # local（默认，= 现状）| redis | auto（与 [cache].mode 裁决同源）
 key_ttl_secs = 300       # Redis 桶键 TTL（秒，夹在 60..=86400）；
                          # 实际生效值再与「桶自然补满秒数 × 2」取大，避免提前过期导致限流被放宽
 

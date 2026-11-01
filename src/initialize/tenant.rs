@@ -1695,7 +1695,9 @@ mod menu_scope_tests {
         let targets = vec![10_i64, 20, 30];
         assert_eq!(
             menus_allowed_by_scope(Some(&TenantMenuScope::Unknown), &targets),
-            ScopeGrant::SkipUnknownScope
+            ScopeGrant::SkipUnknownScope,
+            "读侧不可信时不得产生任何授权写入：未知套餐范围必须落 SkipUnknownScope，\
+             这里拿到 Grant(..) 就是把白名单外的自助按钮发给租户"
         );
         assert_ne!(
             menus_allowed_by_scope(Some(&TenantMenuScope::Unknown), &targets),
@@ -1789,6 +1791,44 @@ mod menu_scope_tests {
         );
     }
 
+    /// 位置腿的**纯判定**：`read_needle` 必须出现在 `txn_needle` 之前。
+    ///
+    /// 返回 `Option<bool>` 而不是 `bool`，是因为这一条断言原来写成
+    /// `src.find(a).unwrap_or(usize::MAX) < src.find(b).unwrap_or(usize::MAX)`：
+    /// 两个 needle 任一个不在生产视图里（改名、被合并进函数、采集面塌了），比较式就变成
+    /// `MAX < MAX`（恒假）或 `0 < MAX`（恒真）——**取不到**这个状态在布尔里没有落脚点。
+    /// 现在三种结局（顺序对 / 顺序反 / 取不到）各能单独造出来证伪（AGENTS ⑧㉞）。
+    fn read_before_transaction(src: &str, read_needle: &str, txn_needle: &str) -> Option<bool> {
+        let read_at = src.find(read_needle)?;
+        let txn_at = src.find(txn_needle)?;
+        Some(read_at < txn_at)
+    }
+
+    /// 位置腿自身的可证伪性：合成三种形状，各指向一个不同结局。
+    ///
+    /// 立这条的理由不是"多一个测试"：真实树上这一条永远是 `Some(true)`，把判定改成恒
+    /// `Some(true)`（变异 T-I）之后**真实树照常绿**——也就是说这条腿的牙只能由夹具证。
+    #[test]
+    fn transaction_position_leg_is_falsifiable_by_synthetic_fixtures() {
+        const READ: &str = "let Ok(pid) = row.try_get::<";
+        const TXN: &str = "let txn = db.begin().await?;";
+        // 正控：读在事务之前 ⇒ 放行
+        assert_eq!(
+            read_before_transaction(&format!("{READ}\n{TXN}"), READ, TXN),
+            Some(true),
+            "合规形状必须放行，否则这一条会变成每轮必红"
+        );
+        // 缺陷形状：读被挪进事务内 ⇒ 必须判否
+        assert_eq!(
+            read_before_transaction(&format!("{TXN}\n{READ}"), READ, TXN),
+            Some(false),
+            "读被挪到事务开始之后必须判否，不得读成放行"
+        );
+        // 输入坏了：任一 needle 缺失 ⇒ None（不得当成"没有违规"，也不得当成"顺序反了"）
+        assert_eq!(read_before_transaction(TXN, READ, TXN), None);
+        assert_eq!(read_before_transaction(READ, READ, TXN), None);
+    }
+
     /// 形状锁（同族第二处，Phase 3 换源）：`sys_dept` 父子关系的读失败不得再被折成
     /// "这一行不存在"。改造前写的是 `if let Ok(Some(pid)) = …{ children… }`——
     /// `Err`（列形状不符）与 `NULL`（旧模型的根/孤儿行）走同一条"跳过"路径，
@@ -1818,14 +1858,15 @@ mod menu_scope_tests {
             "parent_id 读侧必须显式把 Err 变成中止（`let … else {{ return Err }}`）"
         );
         // 中止必须真的发生在**写之前**：BFS 建图排在 `db.begin()` 之前，
-        // 而"跳过根部门"那一条在事务内——它现在必须是 return Err（未提交即整体回滚）
-        let bfs_at = src.find(required).unwrap_or(usize::MAX);
-        let txn_at = src
-            .find("let txn = db.begin().await?;")
-            .unwrap_or(usize::MAX);
-        assert!(
-            bfs_at < txn_at,
-            "父子图读取必须排在事务开始之前（否则中止时已写入的行留在未回滚状态）"
+        // 而"跳过根部门"那一条在事务内——它现在必须是 return Err（未提交即整体回滚）。
+        // 位置比较走 `read_before_transaction` 而不再就地 `bfs_at < txn_at`：两处 `unwrap_or(usize::MAX)`
+        // 让"needle 取不到"与"顺序对"在比较式里长得一样（缺一个就是 `MAX < MAX` ⇒ 恒假，
+        // 或 `0 < MAX` ⇒ 恒真），而断言照常绿。取不到必须由 `None` 单独说一件事。
+        assert_eq!(
+            read_before_transaction(&src, required, "let txn = db.begin().await?;"),
+            Some(true),
+            "父子图读取必须排在事务开始之前（否则中止时已写入的行留在未回滚状态）；\
+             两个 needle 任一个取不到都是 `None`，同样判红——不得读成放行"
         );
         assert_eq!(
             src.matches("Phase 3 换源中止").count(),

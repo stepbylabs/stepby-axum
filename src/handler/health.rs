@@ -337,6 +337,17 @@ pub async fn metrics(
     // b89：重资源入口闸口指标（上限/可用/结局三条量，采集面 = HeavyEntry::ALL）
     s.push_str(&crate::common::resource_gate::render_prometheus());
 
+    // b149：字段加密结局指标（写侧 5 档 / 读侧 4 档，采集面 = SealOutcome::ALL、
+    // UnsealOutcome::ALL）。"密钥没配"与"密钥坏了"与"本来就是明文"在界面与日志上
+    // 都曾同形，只有计数分档才能让人判断该配密钥、该恢复旧 key_id，还是什么都不用做。
+    s.push_str(&crate::common::encrypted_value::render_prometheus());
+
+    // b149：共享态读写的结局三态指标（读 hit/miss/unavailable、窗口
+    // acquired/contended/unavailable、写 done/failed，采集面 = Site::ALL）。
+    // 「存储坏了」被读成「未命中 / 没抢到」时，界面与日志同时表现为"一切正常但功能没做"，
+    // 只有分档计数能让人判断这是缓存效果打折、还是提醒整轮停发。
+    s.push_str(&crate::common::store_outcome::render_prometheus());
+
     Ok(s)
 }
 

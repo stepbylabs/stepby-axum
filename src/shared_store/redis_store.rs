@@ -909,10 +909,16 @@ mod tests {
     /// - `unwrap_or(1)`：EXISTS 失败被读成"键已存在" ⇒ 吊销键永不补回（令牌复活）；
     /// - `let _: Result<(), _>`：SET 结果被丢弃 ⇒ 日志照打"回填完成"；
     /// - 缺 `*_failed` 计数 / 缺分档 WARN：失败不可归因。
+    ///
+    /// 后另加**共用尺**一支（b149 项 27）：本地那两支字面量只认 `unwrap_or(1)` 与
+    /// `let _: Result<(), _>`，`unwrap_or(false)` / `unwrap_or(true)` /
+    /// `unwrap_or_default()` 都不在视野里。方向取**并集**而不是替换——
+    /// 摘掉本地 clause 等于借统一之名放松既有那把锁（b87 §6）。
     fn reports_bootstrap_failures(body: &str) -> bool {
         let code = code_only(body);
         !code.contains("unwrap_or(1)")
             && !code.contains("let _: Result<(), _>")
+            && crate::common::fold_scan::folds_errors_into_defaults(&code).is_empty()
             && code.contains("rev_failed += 1")
             && code.contains("ver_failed += 1")
             && code.contains("EXISTS 失败")
@@ -975,6 +981,38 @@ mod tests {
         assert!(
             reports_bootstrap_failures(compliant),
             "修好后的形状必须放行（否则这把锁会在合规代码上红）"
+        );
+    }
+
+    /// 共用尺那一支必须**独立承重**：本地两支字面量都不命中、只有共用尺看得见的
+    /// 折叠形状，要让判据判否。少了这条，"并轨"扩大的那一半就从未被检验
+    /// （AGENTS ⑥：反脆弱用例要有期望成功的正控对）。
+    #[test]
+    fn shared_strictness_leg_is_load_bearing_in_bootstrap() {
+        let with_local_blind_fold = r#"
+            let exists: i64 = match cmd(EXISTS).arg(&key).query_async(&mut redis).await {
+                Ok(v) => v,
+                Err(e) => { tracing::warn!(error = %e, "吊销回填：EXISTS 失败，按缺失处理"); 0 }
+            };
+            let taken = store.set_nx_ex(&arb_key, "1", ttl).await.unwrap_or(false);
+            if taken {
+                rev_failed += 1;
+                tracing::warn!(error = %e, "pwd_ver 回填：GET 失败，按落后处理");
+                tracing::warn!("SET 失败");
+                ver_failed += 1;
+                tracing::warn!(revocations_failed = rev_failed, pwd_versions_failed = ver_failed,
+                    "Redis 启动回填未完全成功：失败项会在下次启动重试");
+            }
+        "#;
+        // 前置条件：夹具必须落在本地两支字面量的盲区里，否则它证明不了新腿
+        let code = code_only(with_local_blind_fold);
+        assert!(
+            !code.contains("unwrap_or(1)") && !code.contains("let _: Result<(), _>"),
+            "夹具必须打不中本地那两支旧字面量"
+        );
+        assert!(
+            !reports_bootstrap_failures(with_local_blind_fold),
+            "`unwrap_or(false)` 把「存储坏了」读成「没抢到」——共用尺必须把这一型判否"
         );
     }
 

@@ -44,28 +44,50 @@ use crate::utils::masking::{
 /// 审计日志记录 `target_tenant_id` = 被操作资源租户，使资源所属租户也能检索到该操作；
 /// 二者相同或无 handler 写入时为 `None`。
 ///
-/// 内部使用 `Arc<Mutex<Option<i64>>>` 共享内部可变性，避免跨 `await` 持有 `MutexGuard`。
-#[derive(Clone, Debug, Default)]
-pub struct TargetTenant(pub Arc<std::sync::Mutex<Option<i64>>>);
+/// 内部用 `AtomicI64` + `UNSET` 哨兵（此前是 `Arc<Mutex<Option<i64>>>`）。
+///
+/// **为什么换**：`Mutex` 有"中毒"这一第三态，而旧实现的两支读取路径都把它折回了正常值——
+/// `if let Ok(mut guard) = self.0.lock()`（写侧：中毒 ⇒ 静默不写）与
+/// `self.0.lock().ok().and_then(...)`（读侧：中毒 ⇒ 读成"handler 没写目标租户"）。
+/// 于是"前一个 panic 弄坏了这把锁"与"这次操作没有跨租户目标"在审计行里**逐字节同形**，
+/// 平台代管操作的归属就此静默丢失且无从归因（b149 项 18；AGENTS「失败不得折成正常值」）。
+/// 原子量没有中毒态，这个失败模式在类型上不存在——比"记得处理 `PoisonError`"更便宜也更可靠。
+#[derive(Clone, Debug)]
+pub struct TargetTenant(pub Arc<std::sync::atomic::AtomicI64>);
+
+/// "尚未写入目标租户"的哨兵。取 `i64::MIN` 而不是 `0`：**`0` 是合法的平台租户号**，
+/// 拿它当"没有"会把平台代管操作写成未记录（AGENTS ㉓：哨兵值必须落在值域之外）。
+const UNSET_TENANT: i64 = i64::MIN;
 
 impl TargetTenant {
-    /// 创建空单元（`None` 表示未记录目标租户）
+    /// 创建空单元（哨兵表示未记录目标租户）
     pub fn new() -> Self {
-        Self(Arc::new(std::sync::Mutex::new(None)))
+        Self(Arc::new(std::sync::atomic::AtomicI64::new(UNSET_TENANT)))
     }
 
     /// handler 侧写入被操作资源所属租户
     ///
-    /// Mutex 中毒时静默忽略（审计字段，不应影响主流程）。
+    /// 无失败通道（原子 store），因此"审计字段没写到"这一族在这里结构上不可能。
     pub fn set(&self, tenant_id: i64) {
-        if let Ok(mut guard) = self.0.lock() {
-            *guard = Some(tenant_id);
-        }
+        self.0
+            .store(tenant_id, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 中间件侧读取目标租户；未写入或中毒时返回 `None`
+    /// 中间件侧读取目标租户；未写入时返回 `None`
+    ///
+    /// `Relaxed` 足够：写侧与读侧同处一条请求的 future 内（中间件在 `next.run` 返回后读），
+    /// 先后关系由任务本身给出，不依赖这里的内存序。
     pub fn get(&self) -> Option<i64> {
-        self.0.lock().ok().and_then(|guard| *guard)
+        let v = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        (v != UNSET_TENANT).then_some(v)
+    }
+}
+
+/// `Default` 必须**手写**：`#[derive(Default)]` 会给 `AtomicI64` 装上 `0`，
+/// 而 `0` 是平台租户号——"没记录"就变成了"归属平台租户"。
+impl Default for TargetTenant {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1548,5 +1570,67 @@ mod tests {
         assert!(!is_write_method(Method::GET));
         assert!(!is_write_method(Method::HEAD));
         assert!(!is_write_method(Method::OPTIONS));
+    }
+
+    /// 哨兵必须在值域**之外**：`0` 是平台租户号，拿它当"没记录"会把平台代管操作
+    /// 写成未记录（AGENTS ㉓「夹具/哨兵的形状必须等于生产码真实值域」）。
+    #[test]
+    fn target_tenant_sentinel_is_outside_the_tenant_domain() {
+        let fresh = TargetTenant::new();
+        assert_eq!(fresh.get(), None, "新建单元必须是「未记录」");
+        assert_eq!(
+            TargetTenant::default().get(),
+            None,
+            "Default 必须等价于 new()"
+        );
+        // 平台租户 0 必须能被表达（旧实现若把哨兵取 0，这一条直接红）
+        fresh.set(0);
+        assert_eq!(
+            fresh.get(),
+            Some(0),
+            "tenant_id=0 是合法目标，不得与「未写入」同形"
+        );
+        fresh.set(9030);
+        assert_eq!(
+            fresh.get(),
+            Some(9030),
+            "后写覆盖前写（同一请求只会有一个目标）"
+        );
+        assert_eq!(
+            UNSET_TENANT,
+            i64::MIN,
+            "哨兵取值变了就必须重新证明一次它在值域外"
+        );
+    }
+
+    /// **中毒形态反查**：`TargetTenant` 的实现段里不得再出现任何"锁失败被折成正常值"的
+    /// 写法——用共用的 `fold_scan::lock_poison_folds`（本批项 27 并轨的第一位消费者），
+    /// 而不是在本模块再抄一份字符串匹配（两份实现必漂，AGENTS ㉘）。
+    #[test]
+    fn target_tenant_implementation_has_no_poison_fold_shape() {
+        use crate::common::fold_scan;
+        let scan = crate::common::prod_scan::Scan::default();
+        let text = crate::common::prod_scan::prod_file("src/middleware/oper_log.rs", &scan).text();
+        let at = text
+            .find("impl TargetTenant {")
+            .expect("找不到 TargetTenant 实现段 ⇒ 结构变了，本锁的输入已坏");
+        // 取到该 impl 的配平块（下一个顶格 `}` 即结束）
+        let rest = &text[at..];
+        let end = rest
+            .find("\n}")
+            .unwrap_or_else(|| panic!("TargetTenant 实现段花括号不配平 ⇒ 输入坏"));
+        let body = &rest[..end + 2];
+        let hits = fold_scan::lock_poison_folds(body);
+        assert!(
+            hits.is_empty(),
+            "TargetTenant 里又出现把锁故障折成正常值的形状：{hits:?}——\
+             审计归属会静默缺失且无法归因（b149 项 18 立的案）"
+        );
+        // 活性反证：同一条判据必须抓得住被修掉的旧形状
+        let defective = "impl TargetTenant {\n    fn get(&self) -> Option<i64> {\n        self.0.lock().ok().and_then(|g| *g)\n    }\n}\n";
+        assert!(
+            !fold_scan::lock_poison_folds(defective).is_empty(),
+            "反例文本没被抓到 ⇒ 判据恒真（前言 ⑥）"
+        );
     }
 }

@@ -26,6 +26,7 @@ error:
     duplicate: 数据重复，请检查唯一字段
     concurrent_conflict: 同一对象的另一次操作正在进行中，请稍后重试
     concurrent_guard_unavailable: 并发保护暂不可用，本次操作未执行，请稍后重试
+    session_owner_unresolved: 会话归属暂时无法确认（用户信息读取失败），请稍后重试
     db_failed: 数据库操作失败，请联系管理员
     tx_failed: 数据库事务失败，请联系管理员
     session_expired: 会话已过期，请重新登录

@@ -844,6 +844,16 @@ impl JobScheduler {
                                     outcome.skipped
                                 );
                             }
+                            // b149 项 18：互斥窗读不出结局时提醒**照常发**（宁可多发一次，
+                            // 不可整轮静默停发），但那必须是能看见的事实——否则
+                            // "多实例各发一次"的设计代价被记成"系统正常"。
+                            if outcome.window_unavailable > 0 {
+                                tracing::warn!(
+                                    "flow_timeout_scan: {} 条提醒在共享态故障下发出（本轮无跨实例互斥，\
+                                     多实例可能各发一次；去重仍由 DB 的 last_reminded_at 保证）",
+                                    outcome.window_unavailable
+                                );
+                            }
                             // W-9：一致性巡检并入本 Job 尾部（漂移仅告警，明细见 service 日志）
                             if outcome.drift > 0 {
                                 tracing::warn!(

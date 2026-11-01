@@ -35,14 +35,31 @@ pub mod perm_format;
 // `perm:user:*` 缓存失效的唯一实现（四条触发路径同源，见该模块文档的"四份实现"立案）
 pub mod perm_cache;
 pub mod pwd_policy;
+// 共享态读写的结局三态通道（`Err` 不得读成「未命中 / 未抢占」；计数 + 首告 + `/metrics` 同源）
+//
+// ⚠ 声明位置在测试专属模块**之前**：它是生产模块，必须落在默认口径的生产视图里
+// （`every_site_label_is_wired_in_production_code` 与各形状锁的采集面都靠接线反查它，
+// 排到刀口之后 = 整个模块对采集面消失，而报告长得和"干净"一模一样）。
+pub mod store_outcome;
 // 形状锁共用的生产码采集器：**只在测试构建存在**（`pub(crate)` 供各锁模块的 tests 使用）。
 // 采集口径（`#[cfg(test)]` 截断、注释行处理、自豁免、体量下限）收在这一个文件里，
 // 理由与六份旧实现的口径对照见该模块文档。
 #[cfg(test)]
 pub(crate) mod prod_scan;
+// 「失败被折成正常值」的共用判据实现（三份私有谓词的最严并集，见该模块文档的立项理由）。
+// **只在测试构建存在**：它不产出任何运行期行为，只被形状锁消费。
+//
+// ⚠ 测试专属模块的声明必须排在**第一个** `#[cfg(test)]` 聚集处（默认口径的刀口取第一个
+// 逐字符等于 `#[cfg(test)]` 的行，其后的生产声明一并看不见——把这条插在 `flow_graph` 与
+// `held_lock` 之间，`outbound_client` 之后的所有模块立刻从十余把形状锁的采集面消失，
+// 由 `prod_scan::first_attribute_wins_limitation_is_pinned` 当场判红，本批实测踩过）。
+#[cfg(test)]
+pub(crate) mod fold_scan;
 pub mod redact;
 pub mod response;
 pub mod risk_control;
+// 旧会话租户归属回查的**结局类型**（读失败不得折成 tenant_id=0；列表/强退/在线数三站点共用）
+pub(crate) mod session_owner;
 // 重资源入口的全局并发闸门（AGENTS 工程基线 A-2「资源硬上限 + 背压」）
 pub mod resource_gate;
 // 软删释放唯一键的单一实现（列宽感知的 `{原名}_deleted_{id}`）

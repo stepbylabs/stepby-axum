@@ -1055,9 +1055,13 @@ mod tests {
         );
         // 反向：没有这两项的步骤不得凭空造出空对象（导入端要能区分「没有」与「空」）
         let plain = vec![step(2, "GET", "/system/dept", None)];
-        let parsed_plain: serde_json::Value =
-            serde_json::from_str(&build_script(ScriptFormat::Json, &recording(), &plain, "http://h:1"))
-                .expect("合法 JSON");
+        let parsed_plain: serde_json::Value = serde_json::from_str(&build_script(
+            ScriptFormat::Json,
+            &recording(),
+            &plain,
+            "http://h:1",
+        ))
+        .expect("合法 JSON");
         assert!(parsed_plain["steps"][0]["headers"].is_null());
         assert!(parsed_plain["steps"][0]["extractJson"].is_null());
     }

@@ -813,8 +813,14 @@ mod tests {
             vec![1, 2, 3],
             "seq 由数组顺序重编，不从外部快照照抄"
         );
-        assert_eq!(steps[1].headers_json.as_deref(), Some(r#"{"accept":"application/json"}"#));
-        assert_eq!(steps[1].extract_json.as_deref(), Some(r#"{"bId":"data.id"}"#));
+        assert_eq!(
+            steps[1].headers_json.as_deref(),
+            Some(r#"{"accept":"application/json"}"#)
+        );
+        assert_eq!(
+            steps[1].extract_json.as_deref(),
+            Some(r#"{"bId":"data.id"}"#)
+        );
         assert_eq!(
             repo.steps_of(rec.recording_id).await.unwrap().len(),
             3,
@@ -887,17 +893,29 @@ mod tests {
             .unwrap();
         let patch = step("/b");
         assert!(
-            repo.update_step_fields(rec.recording_id, first.step_id, Some(8), &patch, now_naive())
-                .await
-                .unwrap()
-                .is_none(),
+            repo.update_step_fields(
+                rec.recording_id,
+                first.step_id,
+                Some(8),
+                &patch,
+                now_naive()
+            )
+            .await
+            .unwrap()
+            .is_none(),
             "他租户不得改本租户的步骤"
         );
         assert!(
-            repo.update_step_fields(rec.recording_id, first.step_id, Some(7), &patch, now_naive())
-                .await
-                .unwrap()
-                .is_some(),
+            repo.update_step_fields(
+                rec.recording_id,
+                first.step_id,
+                Some(7),
+                &patch,
+                now_naive()
+            )
+            .await
+            .unwrap()
+            .is_some(),
             "同租户必须能改"
         );
     }

@@ -59,7 +59,7 @@ Entity（实体层，已完成）
 | 旧实现缺陷 | 本项目修正方案 |
 |---------------------|--------------|
 | 事务内操作用 `GLOBAL_DB.clone()` 而非 `tx` | 所有事务内操作绑定到 `txn` 连接 |
-| `commit()` 后紧接着 `rollback()` | 使用 `db.transaction(|txn| async { ... }.into_future()).await` 自动提交/回滚 |
+| `commit()` 后紧接着 `rollback()` | 使用 `db.transaction(\|txn\| async { ... }.into_future()).await` 自动提交/回滚 |
 | `unwrap()` 掩盖错误 | 全程 `?` 传播错误，由 `AppError` 统一转换 |
 
 **事务使用模式：**

@@ -783,8 +783,14 @@ fn default_breaker_cooldown_secs() -> u64 {
 
 // ==================== 全局限流实现档位（[rate_limit]） ====================
 
-/// 限流实现档位字面量（顺序：默认项在前，便于阅读时确认"默认为现状"）
-pub const RATE_LIMIT_MODES: &[&str] = &["local", "redis"];
+/// 限流实现档位字面量（顺序：默认项在前，便于阅读时确认"默认为现状"）。
+///
+/// b146 补第三档 `auto`：Helm chart 的默认值一直写着 `auto`（`values.yaml` 的注释也声明
+/// `auto | local | redis`），而这里只有两档 ⇒ `auto` 被当作**非法值**静默回落 `local`，
+/// 只有一句启动 WARN。chart 的 `replicaCount` 默认 2，于是"多实例各算各的桶、配额被放大
+/// N 倍"这个本模块立项要关的口（见 [`RateLimitSettings`] 文档）**由默认值重新打开**，
+/// 而运维读到的文档说它是 auto。`auto` 现为正式档位，裁决与 `[cache].mode` **同源**。
+pub const RATE_LIMIT_MODES: &[&str] = &["local", "redis", "auto"];
 
 /// Redis 桶键 TTL 下界 / 上界（秒）
 pub const RATE_LIMIT_KEY_TTL_MIN_SECS: u64 = 60;
@@ -801,11 +807,24 @@ pub enum RateLimitMode {
 }
 
 impl RateLimitMode {
-    /// 解析配置串（大小写无关、两端 trim）；未登记取值一律回落 [`RateLimitMode::Local`] 并打 WARN。
-    pub fn parse(raw: &str) -> Self {
+    /// 解析**生效**档位（大小写无关、两端 trim）。
+    ///
+    /// - `local` / `redis`：显式档，**不受共享态档位影响**（限流桶走 `state.redis_conn`
+    ///   独立通道，与 `[cache].mode` 是两件事——见 AGENTS A.1 的"唯二例外"）；
+    /// - `auto`：与 `[cache].mode` 的裁决**同源**（由调用方把已裁决的布尔递进来，
+    ///   两边各写一份 `redis_url` 可用性判断必然漂，AGENTS 铁律「读侧与写侧共用同一谓词」）；
+    /// - 其余（未登记取值）：回落 [`RateLimitMode::Local`] 并打 WARN（fail-safe，不拒绝启动）。
+    pub fn resolve(raw: &str, shared_store_on_redis: bool) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "redis" => Self::Redis,
             "local" => Self::Local,
+            "auto" => {
+                if shared_store_on_redis {
+                    Self::Redis
+                } else {
+                    Self::Local
+                }
+            }
             other => {
                 tracing::warn!(
                     value = %other,
@@ -840,12 +859,16 @@ impl RateLimitMode {
 /// - `redis`：Redis 分布式令牌桶；Redis 命令失败时 **fail-closed 返回 503**——
 ///   限流器不可用却静默放行，等于攻击者获准，与 `get_config_for_route` 的既有
 ///   fail-closed 口径一致。
+/// - `auto`（b146 新增）：跟随**共享态档位**的裁决结果（`[cache].mode` 判到 Redis 就用
+///   共享桶，判到 Local 就用进程内桶）。这一档存在的理由是"多实例部署但没配 Redis"与
+///   "单实例零依赖部署"这两种形态**都要求同一个默认值安全**：写死 `local` 让前者静默
+///   放大配额，写死 `redis` 让后者每次请求撞 503。裁决谓词与 `[cache]` 同源，不再各写一份。
 ///
 /// 非法档位取值回落 `local` 并打 WARN（fail-safe，不拒绝启动）；
 /// `key_ttl_secs` 越界由 [`RateLimitSettings::key_ttl`] 夹取。
 #[derive(Clone, Debug, Deserialize)]
 pub struct RateLimitSettings {
-    /// 限流实现档位：`local`（**默认**，= 现状）| `redis`
+    /// 限流实现档位：`local`（**默认**，= 现状）| `redis` | `auto`（与共享态同源裁决）
     #[serde(default = "default_rate_limit_mode")]
     pub mode: String,
     /// Redis 桶键 TTL 秒数（默认 300；夹取 `60..=86400`）。
@@ -866,9 +889,12 @@ impl Default for RateLimitSettings {
 }
 
 impl RateLimitSettings {
-    /// 解析后的档位（非法取值回落 `local` 并打 WARN）
-    pub fn mode(&self) -> RateLimitMode {
-        RateLimitMode::parse(&self.mode)
+    /// 解析后的**生效**档位（`auto` 由 `shared_store_on_redis` 裁决；非法取值回落 `local` 并打 WARN）。
+    ///
+    /// 调用方一律走 [`Settings::rate_limit_mode`]（它把 `[cache].mode` 的裁决结果递进来）——
+    /// 这一位不接受裸 `bool` 的第二个来源，否则"共享态到底在不在 Redis 上"就有两把尺。
+    pub fn mode(&self, shared_store_on_redis: bool) -> RateLimitMode {
+        RateLimitMode::resolve(&self.mode, shared_store_on_redis)
     }
 
     /// 夹取后的 TTL（秒）
@@ -2875,6 +2901,24 @@ fn default_jwt_audience() -> String {
 }
 
 impl Settings {
+    /// 共享态是否落在 Redis（即 `[cache].mode` 的裁决结果，含 `auto` 的可用性判断）。
+    ///
+    /// 这是**唯一**对外暴露的"Redis 用不用得上"谓词：`[cache]` 自己用它建 SharedStore，
+    /// `[rate_limit].mode = auto` 也用它。两处各写一份 `!url.is_empty() && !含 CHANGE_ME`
+    /// 迟早漂（一处认占位符、另一处不认，就是"限流以为在 Redis、缓存以为不在"的断面）。
+    pub fn cache_on_redis(&self) -> bool {
+        self.cache.resolve_mode(&self.redis.url) == CacheMode::Redis
+    }
+
+    /// 限流的**生效**档位（`[rate_limit].mode` 与共享态裁决的合取，见 [`RateLimitMode::resolve`]）。
+    ///
+    /// 每次请求调一次（`middleware/rate_limit.rs`）：与改造前 `mode()` 同量级（同样只做
+    /// trim + 小写化），且裁决结果随配置不可变——本段配置是**启动只读**（AGENTS C.7），
+    /// 不存在"热改后行为分裂"，所以不做缓存位、也不写 `OnceLock`。
+    pub fn rate_limit_mode(&self) -> RateLimitMode {
+        self.rate_limit.mode(self.cache_on_redis())
+    }
+
     /// 从 toml 配置文件加载，随后用环境变量覆盖敏感字段
     /// 环境变量优先级：DATABASE_URL > REDIS_URL > JWT_SECRET > SERVER_HOST > SERVER_PORT > config.toml
     ///
@@ -3023,13 +3067,15 @@ impl Settings {
         if let Ok(v) = std::env::var("UPLOAD_BACKEND") {
             self.upload.backend = v;
         }
-        // 全局限流实现档位（M-8 收口）：RATE_LIMIT_MODE=local|redis
-        // 多实例部署时用环境变量切换（容器场景常无法改配置文件）；非法值由 parse 回落 local 并告警。
+        // 全局限流实现档位（M-8 收口）：RATE_LIMIT_MODE=local|redis|auto
+        // 多实例部署时用环境变量切换（容器场景常无法改配置文件）；非法值由 resolve 回落 local 并告警。
         // 缺省（不设置且配置文件未写）即 local（= 现状：进程内令牌桶）。
+        // `auto` 与 CACHE_MODE 同源裁决（b146）：Helm chart 的默认值一直写着 auto，
+        // 在两档口径下它会被当非法值静默折成 local ⇒ 多副本配额放大，见 RATE_LIMIT_MODES 文档。
         if let Ok(v) = std::env::var("RATE_LIMIT_MODE") {
             self.rate_limit.mode = v;
         }
-        // 共享态存储档位：CACHE_MODE=auto|local|redis（对齐 RATE_LIMIT_MODE 的覆盖方式）
+        // 共享态存储档位：CACHE_MODE=auto|local|redis（RATE_LIMIT_MODE=auto 消费本段的裁决结果）
         // 容器场景无法改配置文件时用环境变量切换档位；非法值由 resolve_mode 回落 auto 并告警。
         if let Ok(v) = std::env::var("CACHE_MODE") {
             self.cache.mode = v;
@@ -3857,27 +3903,63 @@ mod tests {
     }
 
     /// M-8 收口：限流档位解析（**默认 = 现状 local**；非法值 fail-safe 回落 local）+ TTL 夹取
+    ///
+    /// b146 补 `auto` 的三条判据，方向刻意不同：
+    /// - 显式档**不受共享态裁决影响**（限流走 `state.redis_conn` 独立通道，运维把缓存留在
+    ///   local 也能单独把限流搬到 Redis）；
+    /// - `auto` 必须**完全由**该布尔决定（两边各写一份可用性判断就会漂）；
+    /// - 未登记取值照旧回落 local —— 这一支不许被 `auto` 的出现稀释。
     #[test]
     fn test_rate_limit_mode_parse_and_clamp() {
-        assert_eq!(RateLimitMode::parse("redis"), RateLimitMode::Redis);
-        assert_eq!(RateLimitMode::parse("  REDIS  "), RateLimitMode::Redis);
-        assert_eq!(RateLimitMode::parse("local"), RateLimitMode::Local);
+        assert_eq!(RateLimitMode::resolve("redis", false), RateLimitMode::Redis);
+        assert_eq!(
+            RateLimitMode::resolve("  REDIS  ", true),
+            RateLimitMode::Redis
+        );
+        assert_eq!(RateLimitMode::resolve("local", true), RateLimitMode::Local);
+        // 显式 redis 在"共享态不在 Redis"时照旧是 Redis（对照组：证明 resolve 不是
+        // 一把"全部跟随 cache"的糊尺——那样 `mode = "redis"` 会被静默降级，正是本批要修的形状）。
+        for flag in [true, false] {
+            assert_eq!(RateLimitMode::resolve("redis", flag), RateLimitMode::Redis);
+            assert_eq!(RateLimitMode::resolve("local", flag), RateLimitMode::Local);
+        }
+        // auto = 与 [cache] 裁决同源
+        assert_eq!(RateLimitMode::resolve("auto", true), RateLimitMode::Redis);
+        assert_eq!(RateLimitMode::resolve("AUTO", true), RateLimitMode::Redis);
+        assert_eq!(
+            RateLimitMode::resolve(" auto ", false),
+            RateLimitMode::Local
+        );
         for bad in ["", "on", "true", "1", "cluster"] {
             assert_eq!(
-                RateLimitMode::parse(bad),
+                RateLimitMode::resolve(bad, false),
                 RateLimitMode::Local,
                 "{bad:?} 非法取值必须回落 local（默认 = 现状），不得静默改变限流承载方式"
             );
+            // 反向也钉：非法值**不得**因为 flag=true 就被"顺手"升成 redis（fail-safe 的方向
+            // 是回落到现状，不是跟随别的子系统变宽松）。
+            assert_eq!(
+                RateLimitMode::resolve(bad, true),
+                RateLimitMode::Local,
+                "{bad:?} 非法取值不得被 auto 化的 flag 升档"
+            );
         }
         assert_eq!(RateLimitMode::default(), RateLimitMode::Local);
-        // 常量清单与枚举双向一致
-        assert_eq!(RATE_LIMIT_MODES.len(), 2);
-        for raw in RATE_LIMIT_MODES {
-            assert_eq!(RateLimitMode::parse(raw).as_str(), *raw);
+        // 常量清单与枚举双向一致（三档：local 默认项在前 + redis + auto）
+        assert_eq!(RATE_LIMIT_MODES.len(), 3);
+        assert_eq!(
+            RATE_LIMIT_MODES[0], "local",
+            "首项必须是默认档（阅读时确认\"默认=现状\"）"
+        );
+        // 生效档位的字面量仍然只有两个（auto 是**声明**档，不是一种运行时承载方式）
+        for raw in ["local", "redis"] {
+            assert_eq!(RateLimitMode::resolve(raw, false).as_str(), raw);
         }
+        assert_eq!(RateLimitMode::resolve("auto", true).as_str(), "redis");
+        assert_eq!(RateLimitMode::resolve("auto", false).as_str(), "local");
         // 缺省（未写 [rate_limit]）= local + 300s
         let d = RateLimitSettings::default();
-        assert_eq!(d.mode(), RateLimitMode::Local);
+        assert_eq!(d.mode(false), RateLimitMode::Local);
         assert_eq!(d.key_ttl(), 300);
         // TTL 夹取
         let s = RateLimitSettings {
@@ -3890,16 +3972,73 @@ mod tests {
             ..RateLimitSettings::default()
         };
         assert_eq!(s.key_ttl(), RATE_LIMIT_KEY_TTL_MAX_SECS);
-        // 入库模板必须保持 local（多实例才显式切 redis）
+        // 入库模板必须保持 local（多实例才显式切 redis/auto）
         let tpl: Settings = toml::from_str(
             &std::fs::read_to_string("config/config.toml.example")
                 .expect("config/config.toml.example 应存在"),
         )
         .expect("模板应可解析");
         assert_eq!(
-            tpl.rate_limit.mode(),
+            tpl.rate_limit_mode(),
             RateLimitMode::Local,
             "入库模板不得隐式启用 redis 限流（单实例默认）"
+        );
+    }
+
+    /// b146：`auto` 的裁决谓词必须与 `[cache].mode` **同一个来源**，且 Settings 层只有这一个出口。
+    ///
+    /// 立的案是 chart 的 `rateLimitMode: auto` 长期被当非法值折成 local（多副本 ⇒ 配额放大 N 倍，
+    /// 只有一句 WARN）。这一条钉住"两个子系统共用一把尺"这件事本身：`cache_on_redis()` 的
+    /// 四种输入形态逐一验证，再验 `rate_limit_mode()` 确实**经过**它（不是又抄了一遍谓词）。
+    #[test]
+    fn rate_limit_auto_follows_the_same_redis_predicate() {
+        // 基线取**发货模板**反序列化出来的完整 Settings 再改三个字段：`Settings` 没有
+        // derive(Default)（server/database/redis 三段是必填），手拼半截 TOML 会在
+        // `[database] max_connections` 这类必填项上解析失败——拿真实模板当夹具，
+        // 夹具的形状就等于生产真实产出的形状（AGENTS 测试门禁 ㉓）。
+        let template = std::fs::read_to_string("config/config.toml.example")
+            .expect("config/config.toml.example 应存在");
+        let base: Settings = toml::from_str(&template).expect("模板应可解析");
+        let mk = |cache_mode: &str, redis_url: &str, rl_mode: &str| {
+            let mut s = base.clone();
+            s.cache.mode = cache_mode.to_string();
+            s.redis.url = redis_url.to_string();
+            s.rate_limit.mode = rl_mode.to_string();
+            (s.cache_on_redis(), s.rate_limit_mode())
+        };
+        // 1) 配了可用 Redis + rate_limit=auto ⇒ 共享桶
+        assert_eq!(
+            mk("auto", "redis://:pass@127.0.0.1:6379/0", "auto"),
+            (true, RateLimitMode::Redis)
+        );
+        // 2) 没配 Redis + auto ⇒ 进程内桶（零依赖单文件部署必须照常可用，不许 503）
+        assert_eq!(mk("auto", "", "auto"), (false, RateLimitMode::Local));
+        // 3) 占位符不算配了（与 CacheConfig::resolve_mode 的 CHANGE_ME 判据同源）
+        assert_eq!(
+            mk("auto", "redis://CHANGE_ME@127.0.0.1:6379/0", "auto"),
+            (false, RateLimitMode::Local)
+        );
+        // 4) 显式 [cache].mode=local 而 URL 有效 ⇒ cache_on_redis 必须是 false，
+        //    于是 auto 也落 local：这一条证明 auto 读的是**裁决**而不是"URL 非空"。
+        assert_eq!(
+            mk("local", "redis://:pass@127.0.0.1:6379/0", "auto"),
+            (false, RateLimitMode::Local)
+        );
+        // 5) 反向对照：cache=redis 时 auto 必须升共享桶
+        assert_eq!(
+            mk("redis", "redis://:pass@127.0.0.1:6379/0", "auto"),
+            (true, RateLimitMode::Redis)
+        );
+        // 6) 显式档位不受 cache 影响（两个方向都验，防"auto 化"蔓延到显式档）
+        assert_eq!(
+            mk("local", "", "redis"),
+            (false, RateLimitMode::Redis),
+            "显式 redis 档不得因为共享态在 local 而被降级"
+        );
+        assert_eq!(
+            mk("redis", "redis://:pass@h/0", "local"),
+            (true, RateLimitMode::Local),
+            "显式 local 档不得因为共享态在 Redis 而被升档"
         );
     }
 

@@ -4,7 +4,8 @@
 //! - GET  /system/uploadConfig       读有效配置（access_key/secret_key 掩码回显）
 //! - PUT  /system/uploadConfig       更新配置（secret_key 传空保留原值；SSRF 校验
 //!   endpoint；写后 refreshCache 热生效）
-//! - POST /system/uploadConfig/test  连通性测试（ListObjectsV2 探活）
+//! - POST /system/uploadConfig/test  连通性测试（ListObjectsV2 探活；入参=屏上草稿，
+//!   空对象=测已存配置）
 //!
 //! 平台专属：三个端点均在 handler 内 `tenant_id == 0` 门控（对齐 sys.ai.*）；
 //! perms 契约：`system:uploadConfig:edit`（菜单 4103，迁移 m20261007_000002）。
@@ -101,11 +102,24 @@ pub async fn switch_backend(
 }
 
 /// POST /system/uploadConfig/test —— 连通性测试（ListObjectsV2 探活）
+///
+/// **入参 = 屏上那份草稿**（与 PUT 同一个 DTO，字段集合因此不可能与保存路径漂开）：
+/// - 空对象 `{}` ⇒ 所有字段缺省 ⇒ 叠加后等于**当前有效配置**，即"测已存的配置"，
+///   与改造前逐字节等价（`/health` 的存储探针走的仍是 `test_connectivity`，不受影响）；
+/// - 填了哪个字段 ⇒ 用该字段探活（未填的沿用有效值，`secret_key` 传空 = 保留原凭据）。
+///
+/// 立项原因（AGENTS 67(a) 同族）：改造前这个按钮**只能**测已存配置，管理员改完
+/// endpoint/bucket 点"测试"拿到的是旧值的结果 —— 于是"测通了、保存后上传全挂"
+/// 与"测失败了、但改的其实是对的"两种误导都无解。屏上那句话必须有判据支撑。
 pub async fn test_config(
     State(state): State<Arc<AppState>>,
     operator: Operator,
+    ValidatedJson(dto): ValidatedJson<UploadConfigUpdateDto>,
 ) -> Result<AjaxResult<String>, AppError> {
     ensure_platform(&operator)?;
-    let message = state.upload_config_service.test_connectivity().await?;
+    let message = state
+        .upload_config_service
+        .test_connectivity_draft(&dto)
+        .await?;
     Ok(AjaxResult::success(message))
 }

@@ -252,6 +252,26 @@ pub(crate) async fn ensure_sso_v4_columns(
     Ok(())
 }
 
+/// 自检专用的"表在不在"判定：`Err` **不折成"不存在"**（b149 项 18）。
+///
+/// 两处启动自检（SSO 客户端自检 / 域名链路自检）都要先问"这张表存在吗"，
+/// 而 `sso_table_exists` 本身是会失败的读。此前它们写 `.unwrap_or(false)`，
+/// 于是一次启动期的 DB 抖动 = "这张表不存在" = 自检整项静默跳过，
+/// 而日志与退出码同时表现为"一切正常"。这里把第三种结局留在日志里：
+/// **动作**不变（跳过本项自检、不影响启动），变的是**归因**——运维能看出
+/// 这是"没核对成"，而不是"核对过且没问题"。
+pub(crate) async fn sso_table_present_for_check(db: &DatabaseConnection, table: &str) -> bool {
+    match sso_table_exists(db, table).await {
+        Ok(exists) => exists,
+        Err(e) => {
+            tracing::warn!(
+                "启动自检无法判定 {table} 是否存在（本项未核对，不等于核对过且没问题）：{e}——共享库或连接异常时请复核后重启，自检会在下一次启动重新执行"
+            );
+            false
+        }
+    }
+}
+
 /// v4 §1.3 / §10：SSO 启动自检（仅告警，不阻断启动）
 ///
 /// 1. SSO 启用时 issuer 必须为 https（本机回环豁免，validate_secrets 已硬校验，此处兜底告警）；
@@ -261,10 +281,7 @@ pub(crate) async fn sso_startup_self_check(db: &DatabaseConnection, settings: &S
     if !settings.sso.enabled {
         return;
     }
-    if !sso_table_exists(db, "sys_oauth_client")
-        .await
-        .unwrap_or(false)
-    {
+    if !sso_table_present_for_check(db, "sys_oauth_client").await {
         return;
     }
     let issuer = settings.sso.issuer.trim();
@@ -340,10 +357,7 @@ pub(crate) async fn tenant_host_chain_self_check(
     if !trusted_proxies.is_empty() {
         return None;
     }
-    if !sso_table_exists(db, "sys_tenant_domain")
-        .await
-        .unwrap_or(false)
-    {
+    if !sso_table_present_for_check(db, "sys_tenant_domain").await {
         return None;
     }
     // 口径与真实的 host→tid 解析源严格一致（`SysTenantDomainRepository::find_active_by_domain`：
@@ -356,7 +370,17 @@ pub(crate) async fn tenant_host_chain_self_check(
         .await
     {
         Ok(Some(row)) => {
-            let count = row.try_get::<i64>("", "c").unwrap_or(0);
+            // 计数列读不出来**不得折成 0**（0 = "没有可解析绑定" = 不告警，
+            // 与"读不出这一列"是两件事；b149 项 18）
+            let count = match row.try_get::<i64>("", "c") {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "域名链路自检：无法按 BIGINT 读出 sys_tenant_domain 的计数列（列形状/affinity 与预期不符），本项**未核对**：{e}"
+                    );
+                    return None;
+                }
+            };
             if count > 0 {
                 tracing::warn!(
                     active_domains = count,
@@ -521,6 +545,11 @@ pub(crate) async fn ensure_runtime_secrets_encrypted(db: &DatabaseConnection, en
         return;
     }
     // (表, 主键列, 敏感列)
+    //
+    // ⚠ 这份清单**不由人记得**：`initialize::encrypted_backfill_contract` 按
+    // `src/entity/*.rs` 的列类型派生采集面做双向对账——新增 `EncryptedString` 列却没登记、
+    // 登记了但实体已不再是密文列、主键列与实体不一致，三种形状各红一条腿。
+    // 通用层写侧的降级明文（密钥未配 / seal 失败）**只能靠这里回填自愈**，漏登记 = 永久明文。
     const TARGETS: &[(&str, &str, &str)] = &[
         ("sys_oauth_provider", "provider_id", "client_secret"),
         ("sys_oauth_user", "oauth_id", "access_token"),

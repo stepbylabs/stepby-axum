@@ -282,6 +282,13 @@ mod tests {
         panic!("函数 {name} 花括号不配平");
     }
 
+    /// 共用尺（b149 项 27 并轨）：本仓这一族此前有三份互不相等的私有谓词，
+    /// 方向取**最严的并集**；下面那条测试保留本地 `unwrap_or_default()` clause，
+    /// 因为"换成共用尺"不得顺手放松任何一支既有锁（b87 §6 同一条纪律）。
+    fn fold_hits(body: &str) -> Vec<crate::common::fold_scan::FoldHazard> {
+        crate::common::fold_scan::folds_errors_into_defaults(body)
+    }
+
     #[test]
     fn body_read_errors_are_never_folded_into_an_empty_cache_entry() {
         let middleware = function_body("response_cache_middleware");
@@ -297,10 +304,20 @@ mod tests {
             !middleware.contains("unwrap_or_default()"),
             "`unwrap_or_default()` 会把读体失败折成空字节 ⇒ 200 + 空体被缓存"
         );
+        assert!(
+            fold_hits(&middleware).is_empty(),
+            "共用尺在中间件里看到折叠：{:?}",
+            fold_hits(&middleware)
+        );
         let reader = function_body("read_full_body");
         assert!(
             !reader.contains("unwrap_or_default()"),
             "read_full_body 自己不得把失败折成成功"
+        );
+        assert!(
+            fold_hits(&reader).is_empty(),
+            "共用尺在读体函数里看到折叠：{:?}",
+            fold_hits(&reader)
         );
         assert!(
             reader.contains("Err(ServiceError::internal"),
@@ -318,5 +335,30 @@ mod tests {
         "#;
         assert!(original_shape.contains("unwrap_or_default()"));
         assert!(!original_shape.contains("read_full_body(body).await"));
+        // 并且共用尺也必须抓到它（这条把"文本里含有那个词"升级成"这一型会被判红"）
+        assert_eq!(
+            fold_hits(original_shape).len(),
+            1,
+            "HEAD 的读体折叠必须被共用尺抓到"
+        );
+    }
+
+    /// 共用尺那一支在本文件也必须**独立承重**：`unwrap_or(None)` 这一型不在
+    /// 上面那条本地 `unwrap_or_default()` clause 的视野里，只有并集才看得见
+    /// （b149 项 27；方向取并集，摘掉本地 clause 等于放松既有那把锁）。
+    #[test]
+    fn shared_fold_strictness_is_load_bearing_in_cache_read() {
+        let blind_to_local_clause =
+            "let hit: Option<String> = store.get(&cache_key).await.unwrap_or(None);\n";
+        assert!(
+            !blind_to_local_clause.contains("unwrap_or_default()"),
+            "夹具必须落在本地 clause 的盲区里，否则证明不了新腿"
+        );
+        assert_eq!(fold_hits(blind_to_local_clause).len(), 1);
+        // 正控：读体成功、失败上抛的形状不得被抓
+        assert!(
+            fold_hits("let bytes = read_full_body(body).await?;\nnext.run(req).await?\n")
+                .is_empty()
+        );
     }
 }

@@ -1282,8 +1282,22 @@ impl AuthService {
         //   1) 单独 GET user_sessions（需要结果判断是否 DEL 旧 online key）
         //   2) pipeline 批量执行 4 个写操作（SETEX online / 条件 DEL old_online / SETEX
         //      user_sessions / DEL login_fail），单次网络往返
-        // GET 旧 token_hash（如有）——读取结果决定是否 DEL 旧 online key（best-effort：失败视为无旧会话）
-        let old_token_hash_opt: Option<String> = store.get(&user_session_key).await.unwrap_or(None);
+        // GET 旧 token_hash（如有）——读取结果决定是否 DEL 旧 online key。
+        // b149 项 18：走结局三态通道。`Miss` 与 `Unavailable` 的**动作**相同（都不知道旧哈希，
+        // 因而都不删旧 online 键），但**必须可区分**：共享态故障时在线列表里那条残留
+        // 是"我们清理不了"，不是"用户真的还登着"——此前 `unwrap_or(None)` 把两者洗成同形，
+        // 于是故障的可见后果只剩"列表里莫名其妙多了一条"。
+        let old_token_hash_opt = match crate::common::store_outcome::read_key(
+            store.as_ref(),
+            &user_session_key,
+            crate::common::store_outcome::Site::SessionOldHashRead,
+        )
+        .await
+        {
+            crate::common::store_outcome::CacheRead::Hit(hash) => Some(hash),
+            crate::common::store_outcome::CacheRead::Miss
+            | crate::common::store_outcome::CacheRead::Unavailable => None,
+        };
         let need_del_old = match old_token_hash_opt.as_ref() {
             Some(old) if old != &token_hash => {
                 tracing::info!(

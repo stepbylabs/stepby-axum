@@ -1098,6 +1098,7 @@ mod schema_equivalence_lock_tests {
         // 报表模块：151 目录 + 152-153 页面 + 3431-3445 按钮
         // WebHook 模块：157 目录 + 158-159 页面 + 3531-3544 按钮
         // 前端错误模块：160 页面 + 1061 按钮
+        // 操作录制模块：4200 页面 + 4201-4207 按钮（m20261101_000001，纯迁移管理）
         (140..=143).contains(&id)
             || (145..=147).contains(&id)
             || (151..=153).contains(&id)
@@ -1496,27 +1497,18 @@ mod schema_equivalence_lock_tests {
     fn fallback_grants_select_shape_must_route_through_governance() {
         // ① initialize 侧：兜底里不得再出现手写的 `… SELECT …, menu_id FROM sys_menu`
         const SELECT_SHAPE: &str = "sys_role_menu (role_id, menu_id) SELECT";
-        let sources: [(&str, &str); 10] = [
-            // 采集面**由磁盘反查**（下面 for name in &on_disk）：b73 那把锁的注释写着"漏列文件由
-            // 总数锁兜住"，而总数锁判的是 migration 侧裸 VALUES 条数 ⇒ initialize 侧新增文件
-            // 从来没人管（本轮实测磁盘上有 10 个非测试 .rs，老锁只列 7 个）。名字枚举永远落后于
-            // 事实一种写法，所以让磁盘说话：面里缺一个文件就当场点名。
-            ("menu.rs", include_str!(concat!("menu.rs"))),
-            ("scim.rs", include_str!(concat!("scim.rs"))),
-            ("flow.rs", include_str!(concat!("flow.rs"))),
-            ("tenant.rs", include_str!(concat!("tenant.rs"))),
-            ("ledger.rs", include_str!(concat!("ledger.rs"))),
-            ("schema.rs", include_str!(concat!("schema.rs"))),
-            ("mod.rs", include_str!(concat!("mod.rs"))),
-            ("helpers.rs", include_str!(concat!("helpers.rs"))),
-            ("oauth_sso.rs", include_str!(concat!("oauth_sso.rs"))),
-            ("rate_limit.rs", include_str!(concat!("rate_limit.rs"))),
-        ];
-        assert_eq!(sources.len(), 10, "采集面必须等于 initialize 全部兜底文件");
+        // 采集面**直接由磁盘派生**（b149 收口改的这一步）：原先是一张 `include_str!` 名字表
+        // 配一条"磁盘上有但表里没有就点名"的反查，实测新加一个兜底文件时**必然**红——
+        // 而红的那句是"面不全"，不是"这文件写了裸授权"，人还得再来一遍才拿到结论。
+        // 名字表永远落后于事实一种写法（本表前言 ⑬/㉔ 同族），所以让磁盘自己当面：
+        // 新增文件自动受约束，漏判这一族在结构上不再可能。
+        //
+        // 反真空由两头给：① 体量下限（读到的面比既有兜底文件数还少 ⇒ 目录坏了，拒绝判据）；
+        // ② must-hit 正控（下列文件确实必须进面，一旦目录/过滤条件坏了立刻点名）。
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("initialize");
-        let on_disk: Vec<String> = std::fs::read_dir(&dir)
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
             .unwrap_or_else(|e| {
                 panic!("initialize 目录读不到 ⇒ 采集面反查失去输入：{dir:?}（{e}）")
             })
@@ -1524,18 +1516,30 @@ mod schema_equivalence_lock_tests {
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .filter(|name| name.ends_with(".rs") && name != "tests.rs")
             .collect();
+        on_disk.sort();
         assert!(
-            on_disk.len() >= sources.len(),
-            "磁盘上只有 {} 个兜底文件，比采集面还少 ⇒ 面里列了不存在的文件（采集面腐化）：{on_disk:?}",
+            on_disk.len() >= 10,
+            "initialize 的兜底文件面只数到 {} 个（既有下限 10）⇒ 目录或过滤条件坏了，             本轮不作数（\"扫不到\"与\"扫了且干净\"必须可区分，前言 ⑥）",
             on_disk.len()
         );
-        for name in &on_disk {
+        for must_hit in ["helpers.rs", "mod.rs", "rate_limit.rs", "tenant.rs"] {
             assert!(
-                sources.iter().any(|(file, _)| file == name),
-                "initialize/{name} 在磁盘上但不在本锁采集面里 ⇒ 它写的任何裸授权都不受约束"
+                on_disk.iter().any(|n| n == must_hit),
+                "采集面必须含 initialize/{must_hit}（它一直写着兜底授权）⇒ 面为空就是在判空气"
             );
         }
-        for (file, src) in sources {
+        let sources: Vec<(String, String)> = on_disk
+            .iter()
+            .map(|name| {
+                let full = dir.join(name);
+                (
+                    name.clone(),
+                    std::fs::read_to_string(&full)
+                        .unwrap_or_else(|e| panic!("读 initialize/{name} 失败 ⇒ 输入坏：{e}")),
+                )
+            })
+            .collect();
+        for (file, src) in &sources {
             let hand = src.matches(SELECT_SHAPE).count();
             assert_eq!(
                 hand, 0,
@@ -2055,23 +2059,63 @@ mod rate_limit_guard_tests {
         );
     }
 
-    /// 默认档位（`SchedulerConfig::default().replicas = 1` + `RateLimitSettings::default().mode() = local`）
-    /// ⇒ 守卫**不得**触发，锁住"缺省值 = 现状 = 安全态"这一铁律
+    /// 默认档位（`SchedulerConfig::default().replicas = 1` + `RateLimitSettings::default()` 声明
+    /// 档 = `local`）⇒ 守卫**不得**触发，锁住"缺省值 = 现状 = 安全态"这一铁律
     /// （新增开关/守卫不得改变存量部署行为）。
+    ///
+    /// b146 加了 `auto` 档之后，这一条还多证明一件事：**默认值不是 auto**。
+    /// 默认若是 auto，则"配了 Redis 的单实例部署"升级后会突然变成共享桶
+    /// （Redis 抖一下就 503）——那是把行为变更塞进一次无关升级。
     #[test]
     fn default_config_does_not_trigger_rate_limit_guard() {
         use crate::config::settings::{RateLimitSettings, SchedulerConfig};
         let scheduler = SchedulerConfig::default();
         let rate_limit = RateLimitSettings::default();
         assert_eq!(scheduler.replicas, 1, "默认副本数必须为 1");
+        assert_eq!(rate_limit.mode, "local", "默认声明档必须是 local（= 现状）");
         assert_eq!(
-            rate_limit.mode(),
+            rate_limit.mode(false),
             RateLimitMode::Local,
             "默认限流档位必须为 local（= 现状）"
         );
+        // 对照组：默认档在"共享态确实在 Redis"时也不许自己升档（升档只能是运维显式写的）
+        assert_eq!(
+            rate_limit.mode(true),
+            RateLimitMode::Local,
+            "默认档不得因为 cache 在 Redis 就升成共享桶（那是行为变更，不是默认值）"
+        );
         assert!(
-            !rate_limit_local_multi_instance_misconfigured(scheduler.replicas, rate_limit.mode()),
+            !rate_limit_local_multi_instance_misconfigured(
+                scheduler.replicas,
+                rate_limit.mode(false)
+            ),
             "默认配置（单实例 + local）不得触发多实例限流告警"
+        );
+    }
+
+    /// b146：chart 形态（多副本 + `auto`）在 Redis 可用时必须落到共享桶，
+    /// 且**此时守卫不得再报** local 放大——否则"auto 修好了默认值"这句话没有载体。
+    #[test]
+    fn auto_mode_on_multi_replica_lands_on_shared_bucket() {
+        use crate::config::settings::{RateLimitMode, RateLimitSettings};
+        let auto = RateLimitSettings {
+            mode: "auto".to_string(),
+            ..RateLimitSettings::default()
+        };
+        assert_eq!(
+            auto.mode(true),
+            RateLimitMode::Redis,
+            "auto + Redis ⇒ 共享桶"
+        );
+        assert!(
+            !rate_limit_local_multi_instance_misconfigured(2, auto.mode(true)),
+            "chart 默认形态（2 副本 + auto 且 Redis 可用）不得再被判成 local 放大"
+        );
+        // 反向：auto 但 Redis 没配 ⇒ 仍是 local，此时**必须**告警（多副本各算各的桶是真的）
+        assert_eq!(auto.mode(false), RateLimitMode::Local);
+        assert!(
+            rate_limit_local_multi_instance_misconfigured(2, auto.mode(false)),
+            "多副本 + 实际 local 必须告警——不得因为\"写了 auto\"就把真风险洗掉"
         );
     }
 }

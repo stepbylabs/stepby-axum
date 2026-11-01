@@ -780,6 +780,8 @@ mod scim;
 mod tenant;
 
 #[cfg(test)]
+mod encrypted_backfill_contract;
+#[cfg(test)]
 mod tests;
 
 pub(crate) use flow::*;

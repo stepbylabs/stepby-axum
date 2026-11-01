@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::common::constants::{MAX_BATCH_DELETE_SIZE, SECS_PER_HOUR, SUPER_ADMIN_USER_ID};
+use crate::common::session_owner::{LegacyOwnerLookup, OwnerVerdict, tenant_scope_is_safe};
 use crate::common::{AjaxResult, AppError, TableDataInfo};
 use crate::middleware::auth::Operator;
 use crate::state::AppState;
@@ -186,24 +187,36 @@ async fn list_sessions(
     }
 
     // 3.1 旧会话兜底：v2.13 前的 online JSON 无 tenant_id（serde default=0），
-    //     按 user_id 回查 sys_user.tenant_id——否则租户管理员既看不到也踢不掉本租户旧会话
+    //     按 user_id 回查 sys_user.tenant_id——否则租户管理员既看不到也踢不掉本租户旧会话。
+    //     b146：回查的**结局**必须带着走（改造前失败折成空表 ⇒ 每条旧会话都算成 tenant_id=0
+    //     ⇒ 租户操作者的列表**静默变短**，看上去就像"只有这几个人在线"）。
     let legacy_user_ids: Vec<i64> = sessions
         .iter()
         .filter(|(_, s)| s.tenant_id == 0 && s.user_id > 0)
         .map(|(_, s)| s.user_id)
         .collect();
-    let legacy_tenant_map = if legacy_user_ids.is_empty() {
-        std::collections::HashMap::new()
-    } else {
+    let legacy_owner = LegacyOwnerLookup::from_outcome(
+        &legacy_user_ids,
         state
             .user_service
             .tenant_ids_by_user_ids(&legacy_user_ids)
             .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("在线会话租户兜底回填失败（按平台会话处理）: {}", e);
-                std::collections::HashMap::new()
-            })
-    };
+            .map_err(|e| e.to_string()),
+    );
+    // 租户操作者 + 回查失败 ⇒ 响亮失败（503）：不完整列表与"没有会话"逐像素同形，
+    // 而这一屏的用途正是"决定要不要踢人"（平台操作者不受这一支影响，见 tenant_scope_is_safe）
+    if !tenant_scope_is_safe(operator_tid, &legacy_owner) {
+        tracing::warn!(
+            "在线会话租户归属回查失败，拒绝返回可能不完整的列表: operator_tid={} 待回查={} 原因={}",
+            operator_tid,
+            legacy_user_ids.len(),
+            legacy_owner.failed().unwrap_or_default()
+        );
+        return Err(AppError::new(
+            503,
+            crate::tr!("error.common.session_owner_unresolved"),
+        ));
+    }
 
     // 3.2 租户过滤 + 构建列表
     let mut online_list: Vec<SysUserOnline> = Vec::new();
@@ -215,14 +228,14 @@ async fn list_sessions(
         {
             continue;
         }
-        // 会话租户归属：新会话取 JSON 字段；旧会话按 user_id 兜底
-        let session_tid = if session.tenant_id != 0 {
-            session.tenant_id
-        } else {
-            legacy_tenant_map
-                .get(&session.user_id)
-                .copied()
-                .unwrap_or(0)
+        // 会话租户归属：新会话取 JSON 字段；旧会话按 user_id 兜底；确实没有用户行的按平台
+        let session_tid = match legacy_owner.owner_of(session.tenant_id, &session.user_id) {
+            OwnerVerdict::Known(tid) => tid,
+            // 孤儿（数据事实）与 Unknown（归属未证明）都按平台处理（= 改造前口径）：
+            // 走到 Unknown 这一支的前提是平台操作者（租户侧已在 3.1 之前 503），
+            // 对它而言这只是标签不精确、不遮蔽任何可见行，按实登记 N-149-A
+            // （`docs/optimization/quality-batch-149-2026-11-02.md` §6）。
+            OwnerVerdict::Orphan | OwnerVerdict::Unknown => 0,
         };
         // 租户操作者：仅本租户（无法定位租户的旧会话视为平台会话，不展示）
         if operator_tid != 0 && session_tid != operator_tid {
@@ -349,15 +362,31 @@ async fn fallback_to_logininfor(
         .await?;
 
     // 租户归属：登录记录已带 tenant_id；此处按用户名回查 sys_user 以统一口径（与主路径一致的展示用分组）
+    //
+    // b146：这条降级路径原先与主路径同形地 `unwrap_or_else(→ 空表)`，于是"回查失败"把每一行
+    // 都算成 tenant_id=0 ⇒ 下面的分层视图把**本租户全部行**滤掉 ⇒ 管理员看到"0 人在线"，
+    // 而 SQL 明明返回了这些行。Redis 已经坏了，这条路是唯一还能走的路，因此更要响亮失败。
     let names: Vec<String> = rows.iter().filter_map(|r| r.user_name.clone()).collect();
-    let tenant_of_name = state
-        .user_service
-        .tenant_ids_by_user_names(&names)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("降级路径租户归属回查失败（按平台会话处理）: {}", e);
-            std::collections::HashMap::new()
-        });
+    let owner_by_name = LegacyOwnerLookup::from_outcome(
+        &names,
+        state
+            .user_service
+            .tenant_ids_by_user_names(&names)
+            .await
+            .map_err(|e| e.to_string()),
+    );
+    if !tenant_scope_is_safe(operator_tid, &owner_by_name) {
+        tracing::warn!(
+            "降级路径租户归属回查失败，拒绝返回可能不完整的列表: operator_tid={} 待回查={} 原因={}",
+            operator_tid,
+            names.len(),
+            owner_by_name.failed().unwrap_or_default()
+        );
+        return Err(AppError::new(
+            503,
+            crate::tr!("error.common.session_owner_unresolved"),
+        ));
+    }
 
     let mut online_list: Vec<SysUserOnline> = Vec::new();
     for r in rows.iter() {
@@ -368,12 +397,11 @@ async fn fallback_to_logininfor(
         {
             continue;
         }
-        let tid = r
-            .user_name
-            .as_ref()
-            .and_then(|n| tenant_of_name.get(n))
-            .copied()
-            .unwrap_or(0);
+        let tid = match owner_by_name.owner_of(0, r.user_name.as_ref().unwrap_or(&String::new())) {
+            OwnerVerdict::Known(tid) => tid,
+            // 无用户名/查无此人（数据事实）与归属未证明（此分支已在上面 503）都按平台
+            OwnerVerdict::Orphan | OwnerVerdict::Unknown => 0,
+        };
         // 分层视图：租户操作者仅本租户；平台操作者可按 tenantId 筛选
         if operator_tid != 0 && tid != operator_tid {
             continue;
@@ -502,20 +530,44 @@ async fn revoke_one_session(
     })?;
 
     // 2. 租户越权防护（§27.13.2 分层视图）：租户操作者只能强退本租户会话。
-    //    旧 JSON（v2.13 前无 tenant_id，默认 0）按 user_id 回查 sys_user.tenant_id 兜底；
-    //    回查失败/用户已删除时按平台会话处理（0）→ 与 tenants 隔离口径一致地拒绝。
+    //    旧 JSON（v2.13 前无 tenant_id，默认 0）按 user_id 回查 sys_user.tenant_id 兜底。
+    //    b146：改造前"回查失败"与"用户已删除"都折成 0 ⇒ 一律 403「无权限访问该资源」，
+    //    于是**一次数据库抖动被说成越权**：管理员去提权限工单而不是重试，而那条会话仍然活着、
+    //    没人知道它为什么踢不掉（漏吊销不可归因）。现在两种结局分开：
+    //      · 回查失败 ⇒ 503（归属从未被证明，不是拒绝授权）
+    //      · 用户行确实不存在 ⇒ 仍按平台会话拒绝（403，与 tenants 隔离口径一致，是数据事实）
     let operator_tid = operator.tenant_id();
     if operator_tid != 0 {
-        let session_tid = if session.tenant_id != 0 {
-            session.tenant_id
+        let need_lookup = session.tenant_id == 0 && session.user_id > 0;
+        let owner = if need_lookup {
+            LegacyOwnerLookup::from_outcome(
+                &[session.user_id],
+                state
+                    .user_service
+                    .tenant_ids_by_user_ids(&[session.user_id])
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
         } else {
-            state
-                .user_service
-                .tenant_ids_by_user_ids(&[session.user_id])
-                .await
-                .ok()
-                .and_then(|m| m.get(&session.user_id).copied())
-                .unwrap_or(0)
+            LegacyOwnerLookup::NotNeeded
+        };
+        if let Some(reason) = owner.failed() {
+            tracing::warn!(
+                "会话租户归属回查失败，拒绝强退（不得把存储故障说成越权）: operator_tid={} user_id={} 原因={}",
+                operator_tid,
+                session.user_id,
+                reason
+            );
+            return Err(AppError::new(
+                503,
+                crate::tr!("error.common.session_owner_unresolved"),
+            ));
+        }
+        let session_tid = match owner.owner_of(session.tenant_id, &session.user_id) {
+            OwnerVerdict::Known(tid) => tid,
+            OwnerVerdict::Orphan => 0,
+            // 结构上到不了：失败已在上面 503 拦下。保留分支只为"新增结局时编译器提醒人"
+            OwnerVerdict::Unknown => 0,
         };
         if session_tid != operator_tid {
             tracing::warn!(

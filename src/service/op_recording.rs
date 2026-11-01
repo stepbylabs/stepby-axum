@@ -1126,7 +1126,10 @@ impl OpRecordingService {
             expect_status: dto.expect_status,
             note: dto.note.as_deref(),
         })?;
-        let (model, _seq) = self.repo.append_step(recording_id, tenant_id, seed, now).await?;
+        let (model, _seq) = self
+            .repo
+            .append_step(recording_id, tenant_id, seed, now)
+            .await?;
         Ok(model)
     }
 
@@ -1492,7 +1495,10 @@ mod tests {
         let lower = json.to_ascii_lowercase();
         assert!(!lower.contains("authorization"), "凭据头不得入库：{json}");
         assert!(!lower.contains("cookie"), "Cookie 不得入库：{json}");
-        assert!(!lower.contains("content-length"), "传输层重算的头不入库：{json}");
+        assert!(
+            !lower.contains("content-length"),
+            "传输层重算的头不入库：{json}"
+        );
     }
 
     /// 就地改一步要**继承**原 content_type：表单体不能被一次编辑静默改写成 JSON。

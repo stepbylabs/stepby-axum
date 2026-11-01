@@ -594,9 +594,23 @@ pub async fn client_logo(
     }
     // 缓存的是**已通过 SSRF 校验的目标 URL**（不是图片字节：避免二进制进共享态需 base64 膨胀）。
     // 客户端改了 logo_uri 时靠 TTL 自然过期（1 小时）。
-    // best-effort：读失败视为未命中、写失败仅影响下次命中，均与原 Redis 裸调用等价。
+    //
+    // b149 项 18：读走**结局三态**通道。`Unavailable` 与 `Miss` 在这里走同一条**动作**
+    // （都回落去取真值——少一次缓存不影响正确性），但只有分档计数与首告能把
+    // "共享态后端坏了"和"这个客户端还没被缓存过"分开；此前 `unwrap_or(None)`
+    // 让两者在界面、日志与指标上同时同形（Redis 挂掉时表现只是"logo 变慢了"）。
     let cache_key = format!("sso:logo:{}", client_id);
-    let cached_url: Option<String> = state.store.get(&cache_key).await.unwrap_or(None);
+    let cached_url = match crate::common::store_outcome::read_key(
+        state.store.as_ref(),
+        &cache_key,
+        crate::common::store_outcome::Site::SsoLogoRead,
+    )
+    .await
+    {
+        crate::common::store_outcome::CacheRead::Hit(url) => Some(url),
+        crate::common::store_outcome::CacheRead::Miss
+        | crate::common::store_outcome::CacheRead::Unavailable => None,
+    };
     let url = match cached_url.filter(|u| !u.is_empty()) {
         Some(u) => u,
         None => {
@@ -608,10 +622,16 @@ pub async fn client_logo(
                     &OidcError::new("not_found", crate::tr!("error.sso.logo_unavailable")),
                 );
             };
-            let _: Result<(), _> = state
-                .store
-                .set_ex(&cache_key, &url, LOGO_CACHE_TTL_SECS)
-                .await;
+            // 写失败的唯一后果是"下次仍未命中"，业务上无可动作——但结局必须有档：
+            // 此前 `let _: Result<(), _> =` 把它整条丢掉，日志连"缓存没写上"都看不见。
+            let _ack = crate::common::store_outcome::write_best_effort(
+                state.store.as_ref(),
+                &cache_key,
+                &url,
+                LOGO_CACHE_TTL_SECS,
+                crate::common::store_outcome::Site::SsoLogoWrite,
+            )
+            .await;
             url
         }
     };
@@ -735,9 +755,17 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         None
     };
     if let Some(key) = cache_key.as_deref() {
-        // best-effort：读失败视为未命中（与原 Redis GET unwrap_or(None) 等价）
-        let hit: Option<String> = state.store.get(key).await.unwrap_or(None);
-        if let Some(raw) = hit
+        // b149 项 18：读走结局三态通道。`Unavailable` 与 `Miss` 的**动作**相同
+        // （都去真验签——这条路是 fail-closed 的方向，缓存坏了绝不放松校验），
+        // 区别只在观测面：此前 `unwrap_or(None)` 让"共享态故障"表现为"缓存从未命中"，
+        // 运维看见的只有"开了缓存却没效果"，没有任何一条信号指向后端。
+        let hit = crate::common::store_outcome::read_key(
+            state.store.as_ref(),
+            key,
+            crate::common::store_outcome::Site::SsoUserinfoRead,
+        )
+        .await;
+        if let crate::common::store_outcome::CacheRead::Hit(raw) = hit
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
         {
             return with_no_store((StatusCode::OK, Json(v)).into_response());
@@ -753,8 +781,17 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             if let Some(key) = cache_key.as_deref()
                 && let Ok(raw) = serde_json::to_string(&claims)
             {
-                // best-effort 写入：失败只影响"下次是否命中缓存"，不影响本次响应
-                let _: Result<(), _> = state.store.set_ex(key, &raw, ttl).await;
+                // 尽力写：失败的唯一后果是"下次仍未命中"，但结局必须有档——
+                // 此前 `let _: Result<(), _> =` 是"接收了结果又把结局丢掉"的注解形写法，
+                // 比 `_ =` 更像"已处理"，因而任何只看 `_ =` 的扫描都抓不到它。
+                let _ack = crate::common::store_outcome::write_best_effort(
+                    state.store.as_ref(),
+                    key,
+                    &raw,
+                    ttl,
+                    crate::common::store_outcome::Site::SsoUserinfoWrite,
+                )
+                .await;
             }
             with_no_store((StatusCode::OK, Json(claims)).into_response())
         }

@@ -616,6 +616,10 @@ pub struct FlowScanOutcome {
     pub escalated: u64,
     /// 一致性巡检发现的漂移条数（W-9：聚合校验，仅告警不回写）
     pub drift: u64,
+    /// 互斥窗**读不出结局**的条数（b149 项 18）：共享态故障时窗口只能按"照常执行"处理，
+    /// 这一档就是"本轮有多少条提醒是在没有跨实例互斥的情况下发出的"。
+    /// 把它并进 `skipped` 会直接说反话（`skipped` 的含义是"别人已经做了"）。
+    pub window_unavailable: u64,
     /// (assignee_id, title)
     pub notify: Vec<(i64, String)>,
 }
@@ -2590,8 +2594,22 @@ impl SysFlowService {
     /// 超时扫描（共享态存储经参数注入，Service 不持有连接资源；由 scheduler 调用）
     ///
     /// SharedStore 迁移：原两处 `SET NX EX` 互斥/去重窗口改为 `store.set_nx_ex`（原子语义等价）；
-    /// 命令级超时由 store 内部统一管理（原 `cmd_timeout` 包裹语义），Redis 故障按原
-    /// `unwrap_or(None)` 口径视为「未抢占成功」——宁可漏提醒/重复提醒，不阻断扫描主流程。
+    /// 命令级超时由 store 内部统一管理（原 `cmd_timeout` 包裹语义）。
+    ///
+    /// b149 项 18 起两处窗口都取**三态**结局（`common::store_outcome::Window`）：
+    /// `Contended`（别的实例正持有）⇒ 本轮跳过；`Unavailable`（存储读不出结局）⇒ **照常做**
+    /// 并单独计一档 `window_unavailable`；`Acquired` ⇒ 照常做。
+    ///
+    /// 为什么故障时选"照常做"：去重的事实源是 DB 的 `last_reminded_at`，共享态只是
+    /// 多实例互斥窗——故障时"提醒整轮静默停发"（审批超时无人提醒＝业务停滞）比
+    /// "多实例各发一次"（重复一次提醒）更坏。
+    ///
+    /// 改造前两处的**注释口径本就相反**而代码两处都是 `unwrap_or(false)`：
+    /// 首次提醒那段写"视为未抢占成功"（＝跳过），升级提醒那段写
+    /// "存储故障/清空时最坏退化为本轮多实例各发一次"（＝照常做）。
+    /// 也就是说**故障与"没抢到"折叠成同一个值**，两处注释各自的意图都不可能由代码保证，
+    /// 而 `stepby_resource_gate` 之外没有任何指标能说出"这一轮有多少条是带着故障发的"。
+    /// 现在意图写进分支、结局写进指标与 WARN。
     pub async fn scan_timeouts_with_redis(
         &self,
         store: Arc<dyn crate::shared_store::SharedStore>,
@@ -2608,11 +2626,32 @@ impl SysFlowService {
             // 避免多实例同时提醒（TTL = remind_interval_secs）。
             if task.last_reminded_at.is_none() {
                 let key = format!("flow_remind:{}", task.task_id);
-                // 首次提醒互斥窗（原 SET NX EX；store.set_nx_ex 等价，Err 视为未抢占 → 跳过）
-                let acquired = store.set_nx_ex(&key, "1", interval).await.unwrap_or(false);
-                if !acquired {
-                    outcome.skipped += 1;
-                    continue;
+                // 首次提醒互斥窗。b149 项 18 起取**三态**结局：
+                // - `Acquired` ⇒ 本轮由本实例做；
+                // - `Contended` ⇒ 别的实例正持有（跳过，正常态）；
+                // - `Unavailable` ⇒ **照常做**。去重的唯一事实源是 DB 的 `last_reminded_at`
+                //   （做完就重写它），共享态只是多实例互斥窗；存储坏了时"提醒整轮静默停发"
+                //   比"多实例各发一次"更坏——这正是本模块注释一直写的设计，而此前的
+                //   `unwrap_or(false)` 把故障读成"没抢到"，代码与注释相反。
+                let window = crate::common::store_outcome::acquire_window(
+                    store.as_ref(),
+                    &key,
+                    interval,
+                    crate::common::store_outcome::Site::FlowRemindWindow,
+                )
+                .await;
+                match window {
+                    // 正常态之一：别的实例正持有窗口 ⇒ 本轮跳过
+                    crate::common::store_outcome::Window::Contended => {
+                        outcome.skipped += 1;
+                        continue;
+                    }
+                    // 故障**单独计一档**：把它并进 `skipped` 就等于告诉运维
+                    // "这轮一切正常，只是别人抢先了"
+                    crate::common::store_outcome::Window::Unavailable => {
+                        outcome.window_unavailable += 1;
+                    }
+                    crate::common::store_outcome::Window::Acquired => {}
                 }
                 let now2 = crate::common::datetime::now_naive();
                 if let Err(e) = self
@@ -2663,10 +2702,29 @@ impl SysFlowService {
                     .resolve_escalation_target(task.assignee_id, task.applicant_id)
                     .await?
             {
-                // 升级提醒多实例互斥窗（原 SET NX EX；store.set_nx_ex 等价，Err 视为未抢占 → 跳过）
+                // 升级提醒多实例互斥窗（三态，理由与首次提醒那一处完全相同：
+                // `Contended` 才跳过，`Unavailable` 照常执行并单独计一档）
                 let key = format!("flow_escalate:{}", task.task_id);
-                let acquired = store.set_nx_ex(&key, "1", interval).await.unwrap_or(false);
-                if acquired {
+                let window = crate::common::store_outcome::acquire_window(
+                    store.as_ref(),
+                    &key,
+                    interval,
+                    crate::common::store_outcome::Site::FlowEscalateWindow,
+                )
+                .await;
+                match window {
+                    // 正常态之一：别的实例正持有窗口 ⇒ 本轮跳过（与首次提醒那一处同形）
+                    crate::common::store_outcome::Window::Contended => {
+                        outcome.skipped += 1;
+                        continue;
+                    }
+                    // 故障**单独计一档**：并进 `skipped` 等于对运维说"这轮一切正常"
+                    crate::common::store_outcome::Window::Unavailable => {
+                        outcome.window_unavailable += 1;
+                    }
+                    crate::common::store_outcome::Window::Acquired => {}
+                }
+                {
                     let now2 = crate::common::datetime::now_naive();
                     // 升级提醒写流水（系统归因 operator_id=NULL）+ 重写 last_reminded_at 重置周期
                     if let Err(e) = self
@@ -3314,5 +3372,196 @@ mod tests {
             downgrades_only_missing_doc(&commented),
             "注释不得决定刀口：只有代码行才参与判定"
         );
+    }
+
+    // ---------- b149 项 18：两处超时互斥窗的三态结局 ----------
+
+    /// 判定视图：**去模块限定名 + 去全部空白**。
+    ///
+    /// 生产码写的是 `crate::common::store_outcome::Window::Contended`，夹具写的是
+    /// `Window::Contended`，而 `cargo fmt` 会把一条长合并臂折成两行——按原字节匹配时
+    /// 这三种排版本里至少有两种数不出真实形状（AGENTS 61(e)/⑰：锚点读语义不读字节，
+    /// 排版变了而代码事实一字未改，判据不得红在排版上）。
+    fn verdict_view(code: &str) -> String {
+        code.replace("crate::common::store_outcome::", "")
+            .replace("store_outcome::", "")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    }
+
+    /// 谓词：两处窗口都取三态，且 `Unavailable` 是一支**独立**的结局。
+    ///
+    /// 为什么"并进 skipped"也算缺陷形状：`skipped` 的语义是"别的实例已经做了"，
+    /// 而故障时没人做——把它算进 skipped 等于对运维说"本轮一切正常"，
+    /// 而唯一能看见停发的机会就在这一个计数上（AGENTS B.4：结局必须可归因）。
+    fn windows_take_three_states(code: &str) -> Result<(), String> {
+        let flat = verdict_view(code);
+        let acquired = flat.matches("acquire_window(").count();
+        if acquired != 2 {
+            return Err(format!("两处互斥窗必须都走三态通道，实测 {acquired} 处"));
+        }
+        // 合并臂是**最真实**的坏形状（`Contended | Unavailable =>`）：看着"分支在"，
+        // 实际把故障并进了 skipped。而字面量 `Window::Unavailable =>` 在合并臂里**同样出现**，
+        // 所以只数那个字面量的判据会把这一支洗成"分支齐、只是没计数"——指错方向（AGENTS ⑯(a)）。
+        let merged = flat
+            .matches("Window::Contended|Window::Unavailable")
+            .count();
+        if merged != 0 {
+            return Err(format!(
+                "两处都必须有**独立的** `Unavailable` 分支，实测 {merged} 处把故障并进了 Contended/skipped"
+            ));
+        }
+        let unavailable_arms = flat.matches("Window::Unavailable=>").count();
+        if unavailable_arms != 2 {
+            return Err(format!(
+                "两处都必须有 `Unavailable` 分支，实测 {unavailable_arms} 处"
+            ));
+        }
+        let counted = flat.matches("outcome.window_unavailable+=1").count();
+        if counted != 2 {
+            return Err(format!(
+                "故障必须**单独计一档**（并进 skipped = 对运维说\"一切正常\"），实测 {counted} 处"
+            ));
+        }
+        for banned in [".await.unwrap_or(false)", "let_:Result"] {
+            if flat.contains(banned) {
+                return Err(format!("又被折成正常值：{banned}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// 只取代码行：本文件的说明文字里就写着被禁的形状（`unwrap_or(false)`），
+    /// 按原文匹配会让锁红在自己的注释上（AGENTS ⑬）。
+    fn code_lines(body: &str) -> String {
+        body.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| !line.trim_start().starts_with("///"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn timeout_windows_take_three_state_outcomes() {
+        let body = function_body("scan_timeouts_with_redis");
+        let code = code_lines(&body);
+        if let Err(why) = windows_take_three_states(&code) {
+            panic!("超时扫描的共享态窗口：{why}");
+        }
+        // 故障一支必须"照常做"而不是 continue（漏提醒比各发一次更坏，理由见函数文档）
+        for seg in verdict_view(&code).split("Window::Unavailable=>").skip(1) {
+            let arm = seg.split("Window::Acquired").next().unwrap_or(seg);
+            assert!(
+                !arm.contains("continue"),
+                "Unavailable 支不得 continue：存储故障时提醒会整轮静默停发，\
+                 而这正是原 `unwrap_or(false)` 的行为"
+            );
+        }
+    }
+
+    /// 调度侧必须把这一档**说出来**：计数存在却没人读，等于又把它折回"无信号"。
+    #[test]
+    fn scheduler_surfaces_unavailable_window_count() {
+        let cfg = crate::common::prod_scan::Scan::default();
+        let text = crate::common::prod_scan::prod_file("src/scheduler/mod.rs", &cfg).text();
+        let code = code_lines(&text);
+        assert!(
+            code.contains("if outcome.window_unavailable > 0"),
+            "调度器必须在 window_unavailable 非零时留痕。判据取**整条守卫**而不是子串：\
+             只数 `outcome.window_unavailable > 0` 时，`if false && …` 这种永不生效的写法\
+             照样满足（AGENTS ⑮：承诺过的出口必须有生效路径）"
+        );
+        assert!(code.contains("window_unavailable"), "调度器必须消费这一档");
+    }
+
+    /// 判据活性：HEAD 的缺陷形状必须被同一谓词判否，且各支分别打中不同的腿
+    #[test]
+    fn window_shape_detector_is_falsifiable() {
+        // ① 缺陷形状一：`unwrap_or(false)`（故障与"没抢到"同形，且整轮停发）
+        let folded = r#"
+                let acquired = store.set_nx_ex(&key, "1", interval).await.unwrap_or(false);
+                if !acquired { outcome.skipped += 1; continue; }
+        "#;
+        assert!(
+            !windows_take_three_states(folded).is_ok(),
+            "缺陷形状一必须被判否：{folded}"
+        );
+        // ② 缺陷形状二：走了三态通道却把 Unavailable 并进 Contended/skipped（本批之前的一步之遥）
+        let merged = r#"
+                let window = store_outcome::acquire_window(store.as_ref(), &key, interval, Site::FlowRemindWindow).await;
+                match window {
+                    Window::Contended | Window::Unavailable => { outcome.skipped += 1; continue; }
+                    Window::Acquired => {}
+                }
+                let window2 = store_outcome::acquire_window(store.as_ref(), &key2, interval, Site::FlowEscalateWindow).await;
+                match window2 {
+                    Window::Contended | Window::Unavailable => { outcome.skipped += 1; continue; }
+                    Window::Acquired => {}
+                }
+        "#;
+        assert_eq!(
+            windows_take_three_states(merged).err().unwrap(),
+            "两处都必须有**独立的** `Unavailable` 分支，实测 2 处把故障并进了 Contended/skipped",
+            "缺陷形状二必须被\"合并臂\"这一腿点名：字面量 `Window::Unavailable =>` 在它里面同样出现，\
+             只数那个字面量会把它推给计数腿、指错方向"
+        );
+        // ②b 缺陷形状二′：Unavailable 分支整体缺失（两处）——必须落在"分支缺失"而不是"没计数"
+        let missing_arm = r#"
+                let window = store_outcome::acquire_window(store.as_ref(), &key, interval, Site::FlowRemindWindow).await;
+                match window {
+                    Window::Contended => { outcome.skipped += 1; continue; }
+                    Window::Acquired => {}
+                }
+                let window2 = store_outcome::acquire_window(store.as_ref(), &key2, interval, Site::FlowEscalateWindow).await;
+                match window2 {
+                    Window::Contended => { outcome.skipped += 1; continue; }
+                    Window::Acquired => {}
+                }
+        "#;
+        assert!(
+            windows_take_three_states(missing_arm)
+                .err()
+                .unwrap()
+                .contains("都必须有 `Unavailable` 分支，实测 0 处"),
+            "分支整体缺失必须被\"分支缺失\"这一腿点名（实测 0 处），而不是被计数腿蒙混"
+        );
+        // ③ 缺陷形状三：三支配齐但不单独计数
+        let uncounted = r#"
+                let window = store_outcome::acquire_window(store.as_ref(), &key, interval, Site::FlowRemindWindow).await;
+                match window {
+                    Window::Contended => { outcome.skipped += 1; continue; }
+                    Window::Unavailable => {}
+                    Window::Acquired => {}
+                }
+                let window2 = store_outcome::acquire_window(store.as_ref(), &key2, interval, Site::FlowEscalateWindow).await;
+                match window2 {
+                    Window::Contended => { outcome.skipped += 1; continue; }
+                    Window::Unavailable => {}
+                    Window::Acquired => {}
+                }
+        "#;
+        assert!(
+            windows_take_three_states(uncounted)
+                .unwrap_err()
+                .contains("单独计一档"),
+            "缺陷形状三必须被计数腿点名：故障发生了却没有任何数前进"
+        );
+        // ④ 正控：真实函数体必须放行（已在上一条测试里验过一次，这里验夹具本身不空转）
+        let good = r#"
+                let window = store_outcome::acquire_window(store.as_ref(), &key, interval, Site::FlowRemindWindow).await;
+                match window {
+                    Window::Contended => { outcome.skipped += 1; continue; }
+                    Window::Unavailable => { outcome.window_unavailable += 1; }
+                    Window::Acquired => {}
+                }
+                let window2 = store_outcome::acquire_window(store.as_ref(), &key2, interval, Site::FlowEscalateWindow).await;
+                match window2 {
+                    Window::Contended => { outcome.skipped += 1; continue; }
+                    Window::Unavailable => { outcome.window_unavailable += 1; }
+                    Window::Acquired => {}
+                }
+        "#;
+        assert!(windows_take_three_states(good).is_ok(), "合规夹具必须放行");
     }
 }

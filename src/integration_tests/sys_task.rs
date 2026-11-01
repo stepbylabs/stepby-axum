@@ -200,7 +200,7 @@ async fn test_task_terminal_states_are_final() {
 /// 解释不了"——那是一种比报错更差的结局，因为它看起来成功了。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_task_type_must_be_in_whitelist() {
-    use crate::service::sys_task_service::{SysTaskService, TaskCreateDto, TASK_TYPES};
+    use crate::service::sys_task_service::{SysTaskService, TASK_TYPES, TaskCreateDto};
 
     let ctx = TestContext::new().await;
     let svc = SysTaskService::new(ctx.state.db.clone());
@@ -274,7 +274,10 @@ async fn test_task_progress_is_clamped_to_total() {
         .await
         .expect("越界上报不得报错（它是调用方的口径问题，不是本行的失败）");
     assert_eq!(over.current, 10, "current 必须收敛到 total: {over:?}");
-    assert_eq!(over.progress, 100, "progress 必须满格且与 current 自洽: {over:?}");
+    assert_eq!(
+        over.progress, 100,
+        "progress 必须满格且与 current 自洽: {over:?}"
+    );
 
     let under = svc
         .update_progress(task.task_id, -5, None, &ctx.state)
